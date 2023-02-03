@@ -1,0 +1,12 @@
+FAIR
+fair-calibrate/
+leach-et-al-2021
+*.pyc
+*~*
+*#*
+*.#*
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+*jupyter.*out*
+.ipynb
+*DS_Store
