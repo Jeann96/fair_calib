@@ -10,3 +10,4 @@ leach-et-al-2021
 *jupyter.*out*
 .ipynb
 *DS_Store
+__pycache__/
