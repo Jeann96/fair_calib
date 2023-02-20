@@ -12,6 +12,7 @@ import xarray as xr
 from fair import FAIR
 from fair.io import read_properties
 from fair.interface import fill, initialise
+from pickle_tools import load_obj
 import os
 cwd = os.getcwd()
 
@@ -43,20 +44,19 @@ def load_data(scenario,nconfigs,start,end):
         Emissions for FaIR experiments
 ​
     '''
-    df_solar = pd.read_csv(
-        f"{fair_calibration_dir}/data/forcing/solar_erf_timebounds.csv", index_col="year"
-    )
-    df_volcanic = pd.read_csv(
-        f"{fair_calibration_dir}/data/forcing/volcanic_ERF_monthly_-950001-201912.csv"
-    )
+    df_solar = pd.read_csv(f"{fair_calibration_dir}/data/forcing/solar_erf_timebounds.csv",
+                           index_col="year")
+    df_volcanic = pd.read_csv(f"{fair_calibration_dir}/data/forcing/volcanic_ERF_monthly_-950001-201912.csv",
+                              index_col='year')
+    volcanic_forcing = np.zeros(end-start+1)
+    df_volcanic = df_volcanic[(start-1):]
+    #print(df_volcanic)
+    #print(df_solar)
+    #sys.exit()
     N = end - start + 1
-    solar_forcing = np.zeros(N)
     volcanic_forcing = np.zeros(N)
-    for i, year in enumerate(np.arange(start, end, 1)):
-        volcanic_forcing[i] = np.mean(
-            df_volcanic.loc[((year - 1) <= df_volcanic["year"]) & (df_volcanic["year"] < year)].erf
-        )
-    
+    max_index = int(np.ceil(df_volcanic.index[-1])) - start + 1
+    volcanic_forcing[:max_index] = df_volcanic.groupby(np.ceil(df_volcanic.index.values)//1).mean().squeeze().values
     solar_forcing = df_solar["erf"].loc[start:end].values
     
     # run with harmonized emissions
@@ -78,8 +78,17 @@ def load_configs():
                      index_col=0)
     return df
 
+def load_MC_configs(folder,scenario,names):
+    filename = f'sampling_{scenario}'
+    sampling = load_obj(f'{cwd}/{folder}',filename)
+    mu, cov = sampling['mu'], sampling['cov']
+    df = load_configs()
+    samples = np.random.multivariate_normal(mu,cov,1001)
+    df[names] = samples
+    return df
+
 def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
-            start=1850, end=2020):
+            start=1750, end=2020):
     '''
     Parameters
     ----------
@@ -90,8 +99,9 @@ def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
     emissions : xarray DataArray
         Emissions for FaIR experiments
     df_configs : Pandas DataFrame
-        Parameter values for FaIR run. Each row correspond to one set of
-        parameters
+        Parameter dataframe. Each row correspond to one set of parameters.
+    scenario : str
+        FaIR scenario
 
     Returns
     -------

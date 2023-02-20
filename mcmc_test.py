@@ -14,13 +14,13 @@ Created on Fri Jan  6 07:22:08 2023
 @author: Antti-Ilari Partanen (antti-ilari.partanen@fmi.fi)
 """
 
-import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 cwd = os.getcwd()
 
-from fair_tools import load_data, load_configs, runFaIR
+from fair_tools import load_data, load_configs, load_MC_configs, runFaIR
+from pickle_tools import save_obj
 from scipy.stats import gamma, norm, uniform
 from netCDF4 import Dataset
 from dotenv import load_dotenv
@@ -34,15 +34,17 @@ figdir=f"{cwd}/figures"
 
 # Choose scenario
 #scenario = 'ssp245'
-scenario = 'ssp119'
+scenario = 'ssp245'
+start = 1850
+end = 2020
 # MC parameters
-samples = 10000
-warmup = 1000
+samples = 2000
+warmup = 100
 
 df_configs = load_configs()
-ignore_params = ['ari BC', 'ari CH4', 'ari N2O', 'ari NH3', 'ari NOx', 'ari OC', 'ari Sulfur', 'ari VOC',
-                 'ari Equivalent effective stratospheric chlorine','seed']
-cols = [param for param in df_configs.columns if param not in ignore_params]
+ignored = ['ari BC', 'ari CH4', 'ari N2O', 'ari NH3', 'ari NOx', 'ari OC', 'ari Sulfur', 'ari VOC',
+           'ari Equivalent effective stratospheric chlorine','seed']
+included = [param for param in df_configs.columns if param not in ignored]
 
 # Piror density functions
 distributions = []
@@ -64,40 +66,39 @@ uniform_params = np.array([params[i] for i in np.where(is_uniform)[0]])
 
 prior = lambda x: np.prod(gamma.pdf(x[is_gamma[~is_uniform]],gamma_params[:,0],gamma_params[:,1],gamma_params[:,2])) * np.prod(norm.pdf(x[is_norm[~is_uniform]],norm_params[:,0],norm_params[:,1]))
 
-'''
-df_configs = df_configs.mean(axis=0)
-# The functions expect Pandas DataFrame so if only one row is selected from a
-# DataFrame, the resulting Series is transformed back to DataFrame
-if len(df_configs.shape) == 1:
-    nconfigs = 1
-    df_configs = df_configs.to_frame().transpose()
-else:
-    nconfigs = df_configs.shape[0]
-'''
-
-solar_forcing, volcanic_forcing, emissions = load_data(scenario,1,1850,2020)
+solar_forcing, volcanic_forcing, emissions = load_data(scenario,1,1750,end)
 # Temperature data
 ds_mean = Dataset(f'{cwd}/fair-calibrate/data/HadCrut5_mean.nc')
 years = ds_mean['year'][:].data
 T_data = ds_mean['tas'][:].data
 ds_std = Dataset(f'{cwd}/fair-calibrate/data/HadCrut5_std.nc')
 T_std = ds_std['tas'][:].data
-proposed_configs = df_configs.mean(axis=0).copy().to_frame().transpose()
-prior_configs = proposed_configs.copy()
-T_prior = runFaIR(solar_forcing,volcanic_forcing,emissions,proposed_configs,scenario).temperature.loc[dict(scenario=scenario,layer=0)].mean(axis=1)
+proposed_config = df_configs.mean(axis=0).copy().to_frame().transpose()
+prior_configs = proposed_config.copy()
+fair_prior = runFaIR(solar_forcing,volcanic_forcing,emissions,prior_configs,scenario,end=end)
+T_prior = fair_prior.temperature.loc[dict(scenario=scenario,layer=0)].mean(axis=1)
 
-def residual(x):
-    proposed_configs[cols] = x
-    T_model = runFaIR(solar_forcing,volcanic_forcing,emissions,proposed_configs,scenario).temperature.loc[dict(scenario=scenario,layer=0)].mean(axis=1)
-    return T_model - T_data
+def residual(config):
+    fair = runFaIR(solar_forcing,volcanic_forcing,emissions,config,scenario,
+                   start=1750,end=2020)
+    T_model = fair.temperature.loc[dict(scenario=scenario,layer=0)].mean(axis=1)
+    return T_model[(start-1750):] - T_data
+
+def validate_config(config):
+    #These åaramers require postivity
+    positive = ['gamma', 'c1', 'c2', 'c3', 'kappa1', 'kappa2', 'kappa3', 
+                'epsilon', 'sigma_eta', 'sigma_xi']
+    valid = (config[positive] > 0).all(axis=1) & (config['gamma'] > 0.8) & (config['c1'] > 2) & \
+            (config['c2'] > config['c1']) & (config['c3'] > config['c2']) & (config['kappa1'] > 0.3)
+    return valid[0]
 
 def mcmc_run(residual,x0,samples,warmup,C0=None,std=None,prior=None):
-    res = residual(x0)
-    #ydim = len(res)
+    solar_forcing, volcanic_forcing, emissions = load_data(scenario,1,1750,2020)
+    var = std**2
     xdim = len(x0)
     sd = 2.4**2 / xdim
-    var = std**2
-    wss = np.sum(np.square(res)/var)
+    proposed_config[included] = x0
+    wss = np.sum(np.square(residual(proposed_config))/var)
     log_pos = -0.5 * wss - 0.5 * np.sum(np.log(var)) + np.log(prior(x0))
     # Percentual progress
     progress = 0
@@ -106,6 +107,8 @@ def mcmc_run(residual,x0,samples,warmup,C0=None,std=None,prior=None):
     # Initialize chains
     chain = np.full((warmup+samples,xdim),np.nan)
     chain[0,:] = x0
+    ss_chain = np.full((warmup+samples,xdim),np.nan)
+    ss_chain[0] = wss
     mean = chain[0,:].reshape((xdim,1))
     Ct = C0
     start_time = time.process_time()
@@ -115,12 +118,16 @@ def mcmc_run(residual,x0,samples,warmup,C0=None,std=None,prior=None):
             progress += 10
         #Proposed value for the chain
         proposed = np.random.multivariate_normal(chain[t-1,:],Ct)
-        proposed_configs[cols] = proposed
-        T_model = runFaIR(solar_forcing,volcanic_forcing,emissions,proposed_configs,scenario).temperature.loc[dict(scenario=scenario,layer=0)].mean(axis=1)
-        wss_proposed = np.sum(np.square(T_model-T_data)/var)
-        proposed_log_pos = -0.5 * wss_proposed - 0.5 * np.sum(np.log(var)) + np.log(prior(proposed))
+        proposed_config[included] = proposed
+        valid = validate_config(proposed_config)
+        if not valid:
+            log_acceptance = -np.inf
+        else:
+            wss_proposed = np.sum(np.square(residual(proposed_config))/var)
+            proposed_log_pos = -0.5 * wss_proposed - 0.5 * np.sum(np.log(var)) + np.log(prior(proposed))
+            log_acceptance = proposed_log_pos - log_pos
         #Accept or reject
-        if np.log(np.random.uniform(0,1)) <= proposed_log_pos - log_pos:
+        if np.log(np.random.uniform(0,1)) <= log_acceptance:
             chain[t,:] = proposed
             accepted += 1
             log_pos = proposed_log_pos
@@ -128,13 +135,18 @@ def mcmc_run(residual,x0,samples,warmup,C0=None,std=None,prior=None):
             #print('accepted')
         else:
             chain[t,:] = chain[t-1,:]
+            proposed_config[included] = chain[t-1,:]
+        ss_chain[t] = wss
             #print('rejected')
         #Value in chain as column vector
         vec = chain[t,:].reshape((xdim,1))
         #Recursive update for mean
         next_mean = 1/(t+1) * (t*mean + vec)
         #Adaptation starts after the warmup period
-        if t >= warmup:
+        if t >= warmup - 1:
+            if (t+1-warmup) % 10000 == 0 or t+1 == warmup+samples:
+                np.save(f'MC_results/{scenario}_samples={t+1-warmup}',chain[warmup:(t-1),:])
+                np.save(f'MC_results/{scenario}_cov_{t+1-warmup}',Ct)
             # Recursive update for the covariance matrix
             epsilon = 0.0
             Ct = (t-1)/t * Ct + sd/t * (t * mean @ mean.T - (t+1) * next_mean @ next_mean.T + vec @ vec.T + epsilon*np.eye(xdim))
@@ -144,8 +156,9 @@ def mcmc_run(residual,x0,samples,warmup,C0=None,std=None,prior=None):
     mu = np.mean(chain[warmup:,:],axis=0)
     cov = np.cov(chain[warmup:,:],rowvar=False)
     end_time = time.process_time()
-    print(f"MH performance:\nposteior samples = {samples}\ntime: {end_time-start_time} s\nacceptance ratio = {100*accepted/samples:.2f} %")
-    return {'chain':chain,'samples':samples,'warmup':warmup,'mu':mu,'cov':cov}
+    
+    print(f"MH performance:\nposterior samples = {samples}\ntime: {end_time-start_time} s\nacceptance ratio = {100*accepted/samples:.2f} %")
+    return {'chain':chain,'ss_chain':ss_chain,'samples':samples,'warmup':warmup,'mu':mu,'cov':cov,'names':included}
 
 def plot_distributions(df_configs,mu,cov,chain):
     fig, axs = plt.subplots(7,7,figsize=(25,20))
@@ -181,23 +194,38 @@ def plot_distributions(df_configs,mu,cov,chain):
         axs[row][col].set_yticks(ticks=[],labels=[])
     fig.savefig('plots/distributions')
     plt.show()
+    
+def plot_temperature(prior,posterior,data,std,start,end):
+    years = list(range(start,end+1))
+    T_fig = plt.figure('T',figsize=(10,5))
+    ax_T = T_fig.gca()
+    ax_T.plot(years, prior[(start-1750):], linestyle='--', color='black', markersize=2,label='prior')
+    ax_T.plot(years, posterior[(start-1750):], linestyle='-', color='black', markersize=2,label='posterior')
+    ax_T.errorbar(range(1850,2021), y=data, yerr=std, fmt='.',capsize=5,markersize=1,color='orange')
+    ax_T.plot(range(1850,2021), data, 'r.', markersize=3)
+    ax_T.set_title(f'{scenario}: temperature trend')
+    ax_T.set_xlabel('year')
+    ax_T.set_ylabel('Temperature (°C)')
+    ax_T.legend()
+    T_fig.savefig(f'plots/{scenario}_trend')
+    plt.show()
 
-x0 = proposed_configs[cols].to_numpy().squeeze()
-#stds = df_configs[cols].std(axis=0).to_numpy()
-C0 = np.diag((0.1*df_configs[cols].std(axis=0).to_numpy())**2)
+x0 = proposed_config[included].to_numpy().squeeze()
+#stds = df_configs[included].std(axis=0).to_numpy()
+C0 = np.diag((0.1*df_configs[included].std(axis=0).to_numpy())**2)
 
+filename = f'sampling_{scenario}'
 sampling = mcmc_run(residual,x0,samples,warmup,C0=C0,std=T_std,prior=prior)
-mu, cov, chain = sampling['mu'], sampling['cov'], sampling['chain']
-np.save(f'MC_results/{scenario}_chain_{len(chain)-warmup}_samples',chain)
-np.save(f'MC_results/{scenario}_mu',mu)
-np.save(f'MC_results/{scenario}_cov',cov)
-#mu = np.load(f'MC_results/{scenario}_mu.npy')
-#cov = np.load(f'MC_results/{scenario}_cov.npy')
-#chain = np.load(f'MC_results/{scenario}_chain_{samples}_samples.npy')
+save_obj(sampling, 'MC_results/', filename)
+#mu, cov, chain = sampling['mu'], sampling['cov'], sampling['chain']
+#warmup = sampling['warmup']
+sampled_configs = load_MC_configs('MC_results/',scenario,included)
 
-proposed_configs[cols] = mu
-T_model = runFaIR(solar_forcing,volcanic_forcing,emissions,proposed_configs,scenario).temperature.loc[dict(scenario=scenario,layer=0)].mean(axis=1)
-plot_distributions(df_configs,mu,cov,chain)
+'''
+fair_posterior = runFaIR(solar_forcing,volcanic_forcing,emissions,sampled_configs,scenario,end=end)
+T_post = fair_posterior.temperature.loc[dict(scenario=scenario,layer=0)].mean(axis=1)
+plot_distributions(sampled_configs,mu,cov,chain)
+'''
 '''
 specie = 'CO2'
 specie_fig = plt.figure('specie')
@@ -209,16 +237,4 @@ ax_specie.set_title(f'{scenario}: {specie} concentration')
 ax_specie.set_xlabel('year')
 ax_specie.set_ylabel(f'{specie} concentration')
 '''
-years = list(range(1850,2021))
-T_fig = plt.figure('T',figsize=(15,10))
-ax_T = T_fig.gca()
-ax_T.plot(years, T_prior, linestyle='--', color='black', markersize=2,label='prior')
-ax_T.plot(years, T_model, linestyle='-', color='black', markersize=2,label='posterior')
-ax_T.errorbar(years, y=T_data, yerr=T_std, fmt='.',capsize=5,markersize=1,color='orange')
-ax_T.plot(years, T_data, 'r.', markersize=3)
-ax_T.set_title(f'{scenario}: temperature trend')
-ax_T.set_xlabel('year')
-ax_T.set_ylabel('Temperature (°C)')
-ax_T.legend()
-T_fig.savefig(f'plots/{scenario}_trend')
-plt.show()
+#plot_temperature(T_prior, T_post, T_data, T_std, start, end)
