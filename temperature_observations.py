@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 Created on Thu Feb  2 15:18:27 2023
-
 @author: Antti-Ilari Partanen (antti-ilari.partanen@fmi.fi)
 """
 

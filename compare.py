@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 Created on Mon Feb 20 10:41:59 2023
-
 @author: Antti-Ilari Partanen (antti-ilari.partanen@fmi.fi)
 """
 import os
@@ -77,4 +76,7 @@ ax[1].set_title('TCR')
 ax[1].set_xlabel('K')
 ax[1].set_xlim([0,4])
 ax[1].legend()
+
 fig.savefig(f'{figdir}/TCRE_and_TCR_pdfs.png', dpi=150)
+
+

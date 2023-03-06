@@ -10,10 +10,13 @@ import pandas as pd
 import numpy as np
 import xarray as xr
 import warnings
+from random import sample
+from scipy.stats import gamma, norm, uniform
 from fair import FAIR
 from fair.io import read_properties
 from fair.interface import fill, initialise
-from pickle_tools import load_obj
+from netCDF4 import Dataset
+from fitter import Fitter
 import os
 from dotenv import load_dotenv
 cwd = os.getcwd()
@@ -54,9 +57,6 @@ def load_data(scenario,nconfigs,start,end):
                               index_col='year')
     volcanic_forcing = np.zeros(end-start+1)
     df_volcanic = df_volcanic[(start-1):]
-    #print(df_volcanic)
-    #print(df_solar)
-    #sys.exit()
     N = end - start + 1
     volcanic_forcing = np.zeros(N)
     max_index = int(np.ceil(df_volcanic.index[-1])) - start + 1
@@ -66,14 +66,10 @@ def load_data(scenario,nconfigs,start,end):
     # run with harmonized emissions
     da_emissions = xr.load_dataarray(
         f"{fair_calibration_dir}/output/fair-{fair_v}/v{cal_v}/{constraint_set}"
-        "/emissions/ssp_emissions_1750-2500.nc"
-    )
-    
-    
+        "/emissions/ssp_emissions_1750-2500.nc")
     da = da_emissions.loc[dict(config="unspecified", scenario=scenario)][:N-1, ...]
     fe = da.expand_dims(dim=["scenario","config"], axis=(1,2))
     emissions = fe.drop("config") * np.ones((1, nconfigs, 1))
-    
     return solar_forcing, volcanic_forcing, emissions
 
 def load_configs():
@@ -82,14 +78,74 @@ def load_configs():
                      index_col=0)
     return df
 
-def load_MC_configs(folder,scenario,names):
-    filename = f'sampling_{scenario}'
-    sampling = load_obj(f'{cwd}/{folder}',filename)
-    mu, cov = sampling['mu'], sampling['cov']
+def fit_priors(df_configs,exclude=[]):
+    # Prior density functions
+    distributions = {}
+    cols = df_configs.columns
+    for col in cols:
+        fit = Fitter(df_configs[col].to_numpy(),distributions=["gamma","norm","uniform"])
+        fit.fit(progress=False)
+        best = fit.get_best(method = 'sumsquare_error')
+        for dist in best.keys():
+            distributions[col] = {'distribution':dist,'params':tuple(best[dist].values())}
+    gamma_params = np.stack([distributions[col]['params'] for col in cols if distributions[col]['distribution'] == 'gamma' and col not in exclude])
+    norm_params = np.stack([distributions[col]['params'] for col in cols if distributions[col]['distribution'] == 'norm' and col not in exclude])
+    #uniform_params = np.array([distributions[col]['uniform'] for col in cols if distributions[col]['distribution'] == 'uniform'])
+    is_gamma = np.array([distributions[col]['distribution'] == 'gamma' for col in cols if col not in exclude], dtype=bool)
+    is_norm = np.array([distributions[col]['distribution'] == 'norm' for col in cols if col not in exclude], dtype=bool)
+    #is_uniform = np.array([distributions[col]['distribution'] == 'uniform' for col in cols if col not in exclude], dtype=bool)
+    fun = lambda x: np.prod(gamma.pdf(x[is_gamma],gamma_params[:,0],gamma_params[:,1],gamma_params[:,2])) * np.prod(norm.pdf(x[is_norm],norm_params[:,0],norm_params[:,1]))
+    return fun, distributions
+
+def read_temperature_data():
+    # Temperature data
+    ds_mean = Dataset(f'{cwd}/fair-calibrate/data/HadCrut5_mean.nc','r')
+    T_data = ds_mean['tas'][:].data
+    ds_mean.close()
+    ds_std = Dataset(f'{cwd}/fair-calibrate/data/HadCrut5_std.nc','r')
+    T_std = ds_std['tas'][:].data
+    ds_std.close()
+    return T_data, T_std
+
+def load_MC_configs(folder,scenario,prior_distributions,N=None,seed=None):
+    if seed is not None:
+        np.random.seed(seed)
+    ds = Dataset(f'{cwd}/{folder}/{scenario}/sampling.nc','r')
+    #mu = ds['mu'][:]
+    #cov = ds['cov'][:]
+    names = ds['param'][:]
+    warmup = ds['warmup'][:]
+    chain = ds['chain'][:,:]
+    ds.close()
+    if N is None:
+        N = len(chain) - warmup
+    # Prior configurations
     df = load_configs()
-    samples = np.random.multivariate_normal(mu,cov,1001)
-    df[names] = samples
-    return df
+    all_params = df.columns
+    # Initialise dataframe
+    pos_configs = pd.DataFrame(columns=all_params,index=range(N))
+    for param in all_params:
+        if param in ['sigma_eta','sigma_xi']:
+            pos_configs[param] = np.zeros(N)
+        elif prior_distributions[param]['distribution'] == 'uniform':
+            loc, scale = prior_distributions[param]['params']
+            pos_configs[param] = uniform.rvs(loc=loc,scale=scale,size=N)
+        else:
+            indices = sample(range(warmup,len(chain)),N)
+            param_index = next(i for i in range(len(names)) if names[i] == param)
+            pos_configs[param] = chain[indices,param_index]
+    return pos_configs
+
+def load_optimal_config(folder,scenario):
+    ds = Dataset(f'{cwd}/{folder}/{scenario}/sampling.nc','r')
+    names = ds['param'][:]
+    MAP = ds['MAP'][:]
+    ds.close()
+    opt_config = load_configs().mean(axis=0).to_frame().transpose()
+    opt_config['sigma_eta'], opt_config['sigma_xi'] = 0, 0
+    opt_config[names] = MAP
+    return opt_config
+
 
 def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
             start=1750, end=2020):
@@ -147,10 +203,7 @@ def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
     
     # climate response
     fill(f.climate_configs["ocean_heat_capacity"], df_configs.loc[:, "c1":"c3"].values)
-    fill(
-        f.climate_configs["ocean_heat_transfer"],
-        df_configs.loc[:, "kappa1":"kappa3"].values,
-    )
+    fill(f.climate_configs["ocean_heat_transfer"],df_configs.loc[:,"kappa1":"kappa3"].values)
     fill(f.climate_configs["deep_ocean_efficacy"], df_configs["epsilon"].values.squeeze())
     fill(f.climate_configs["gamma_autocorrelation"], df_configs["gamma"].values.squeeze())
     fill(f.climate_configs["sigma_eta"], df_configs["sigma_eta"].values.squeeze())
@@ -425,3 +478,4 @@ def run_1pctco2(df_configs):
     # tcre_alt=
 
     return tcre,tcr
+
