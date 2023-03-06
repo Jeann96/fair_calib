@@ -1,5 +1,6 @@
 FAIR
 fair-calibrate/
+MC_results/*
 leach-et-al-2021
 *.pyc
 *~*
