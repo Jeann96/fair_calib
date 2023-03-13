@@ -9,7 +9,7 @@ Created on Thu Feb 16 15:06:51 2023
 import pandas as pd
 import numpy as np
 import xarray as xr
-from random import sample
+import warnings
 from scipy.stats import gamma, norm, uniform
 from fair import FAIR
 from fair.io import read_properties
@@ -17,10 +17,11 @@ from fair.interface import fill, initialise
 from netCDF4 import Dataset
 from fitter import Fitter
 import os
+from dotenv import load_dotenv
 cwd = os.getcwd()
 
-from dotenv import load_dotenv
 load_dotenv()
+
 cal_v = os.getenv("CALIBRATION_VERSION")
 fair_v = os.getenv("FAIR_VERSION")
 constraint_set = os.getenv("CONSTRAINT_SET")
@@ -65,7 +66,7 @@ def load_data(scenario,nconfigs,start,end):
     da_emissions = xr.load_dataarray(
         f"{fair_calibration_dir}/output/fair-{fair_v}/v{cal_v}/{constraint_set}"
         "/emissions/ssp_emissions_1750-2500.nc")
-    da = da_emissions.loc[dict(config="unspecified", scenario=scenario)][:N-1, ...]
+    da = da_emissions.loc[dict(config="unspecified", scenario=scenario)][:(N-1), ...]
     fe = da.expand_dims(dim=["scenario","config"], axis=(1,2))
     emissions = fe.drop("config") * np.ones((1, nconfigs, 1))
     return solar_forcing, volcanic_forcing, emissions
@@ -96,42 +97,45 @@ def fit_priors(df_configs,exclude=[]):
     return fun, distributions
 
 def read_temperature_data():
+    # Years
+    #years = list(range(1850,2021))
     # Temperature data
-    ds_mean = Dataset(f'{cwd}/fair-calibrate/data/HadCrut5_mean.nc','r')
-    T_data = ds_mean['tas'][:].data
-    ds_mean.close()
-    ds_std = Dataset(f'{cwd}/fair-calibrate/data/HadCrut5_std.nc','r')
-    T_std = ds_std['tas'][:].data
-    ds_std.close()
-    return T_data, T_std
+    ar6_file = "AR6_GMST.csv"
+    ar6_path = f"{fair_calibration_dir}/data/forcing/{ar6_file}"
+    df = pd.read_csv(ar6_path, index_col=0).to_xarray()
+    T_mean = df['gmst']
+    # Std from HadCrut5 dataset
+    hadcrut5_file = "HadCRUT.5.0.1.0.analysis.ensemble_series.global.monthly.nc"
+    hadcrut5_path = f"{cwd}/leach-et-al-2021/data/input-data/Temperature-observations/{hadcrut5_file}"
+    ds = xr.open_dataset(hadcrut5_path)
+    T_data = ds['tas'].groupby('time.year').mean('time')
+    # Change reference temperature to mean of 1851-1900
+    #T_data = T_data - T_data.loc[dict(year=slice(1850,1900))].mean(dim='year')
+    T_std = T_data.std(dim='realization')
+    return T_mean, T_std
 
-def load_MC_configs(folder,scenario,prior_distributions,N=None,seed=None):
+def load_MC_configs(folder,scenario,names,prior_distributions,N=None,seed=None):
     if seed is not None:
         np.random.seed(seed)
     ds = Dataset(f'{cwd}/{folder}/{scenario}/sampling.nc','r')
-    #mu = ds['mu'][:]
-    #cov = ds['cov'][:]
     names = ds['param'][:]
     warmup = ds['warmup'][:]
     chain = ds['chain'][:,:]
     ds.close()
+    all_params = prior_distributions.keys()
+    pos_configs = pd.DataFrame(columns=all_params)
     if N is None:
+        pos_configs[names] = chain[warmup:,:]
         N = len(chain) - warmup
-    # Prior configurations
-    df = load_configs()
-    all_params = df.columns
-    # Initialise dataframe
-    pos_configs = pd.DataFrame(columns=all_params,index=range(N))
+    else:
+        indices = np.random.choice(np.arange(warmup,len(chain),1,dtype=int),N,replace=False)
+        pos_configs[names] = chain[indices,:]
+    pos_configs[['sigma_eta','sigma_xi']] = np.zeros((N,2))
     for param in all_params:
-        if param in ['sigma_eta','sigma_xi']:
-            pos_configs[param] = np.zeros(N)
-        elif prior_distributions[param]['distribution'] == 'uniform':
-            loc, scale = prior_distributions[param]['params']
-            pos_configs[param] = uniform.rvs(loc=loc,scale=scale,size=N)
-        else:
-            indices = sample(range(warmup,len(chain)),N)
-            param_index = next(i for i in range(len(names)) if names[i] == param)
-            pos_configs[param] = chain[indices,param_index]
+        if param in ['sigma_eta','sigma_xi'] or param in names:
+            continue
+        loc, scale = prior_distributions[param]['params']
+        pos_configs[param] = uniform.rvs(loc=loc,scale=scale,size=N)
     return pos_configs
 
 def load_optimal_config(folder,scenario):
@@ -143,7 +147,6 @@ def load_optimal_config(folder,scenario):
     opt_config['sigma_eta'], opt_config['sigma_xi'] = 0, 0
     opt_config[names] = MAP
     return opt_config
-
 
 def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
             start=1750, end=2020):
@@ -476,3 +479,4 @@ def run_1pctco2(df_configs):
     # tcre_alt=
 
     return tcre,tcr
+
