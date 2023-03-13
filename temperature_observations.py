@@ -40,7 +40,7 @@ fig1, ax1=pl.subplots(1,1)
 # data['HadCrut5'].plot.line(x='year', ax=ax1, color='gray')
 # mean['HadCrut5'].plot(color='black', ax=ax1, linestyle='-', linewidth=1)
 ax1.fill_between(mean['HadCrut5'].year,
-                 data['AR6']['gmst']-std['HadCrut5']*1.96,
+                 data['AR6']['gmst']-std['HadCrut5'],
                  mean['HadCrut5']+std['HadCrut5']*1.96,
                  color='black', alpha=0.1)
 ax1.fill_between(mean['HadCrut5'].year,
@@ -56,3 +56,8 @@ fig1.savefig(f'{figdir}/AR6+HADCRUT5.png', dpi=150)
 
 mean['HadCrut5'].to_netcdf(f'{datadir}/HadCrut5_mean.nc')
 std['HadCrut5'].to_netcdf(f'{datadir}/HadCrut5_std.nc')
+
+fig2, ax2=pl.subplots(1,1)
+mean['HadCrut5'].plot(ax=ax2, label='HADCRUT5')
+data['AR6']['gmst'].plot(ax=ax2, label='AR6')
+ax2.legend()

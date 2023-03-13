@@ -79,4 +79,3 @@ ax[1].legend()
 
 fig.savefig(f'{figdir}/TCRE_and_TCR_pdfs.png', dpi=150)
 
-
