@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Thu Feb 16 15:06:51 2023
+Created on Thu Feb 16 2023
 
 @author: nurmelaj
 """
@@ -10,12 +10,11 @@ import pandas as pd
 import numpy as np
 import xarray as xr
 import warnings
-from scipy.stats import gamma, norm, uniform, skewnorm, gaussian_kde
+from scipy.stats import norm, uniform, skewnorm, gaussian_kde
 from fair import FAIR
 from fair.io import read_properties
 from fair.interface import fill, initialise
 from netCDF4 import Dataset
-from fitter import Fitter
 import os
 from dotenv import load_dotenv
 cwd = os.getcwd()
@@ -41,9 +40,9 @@ def load_data(scenario,nconfigs,start,end):
 ​
     Returns
     -------
-    solar_forcing : Numpy array
+    solar_forcing : nd-array
         Solar forcing data
-    volcanic_forcing : Numpy array
+    volcanic_forcing : nd-array
         Volcanic forcing data
     emissions : xarray DataArray
         Emissions for FaIR experiments
@@ -127,150 +126,83 @@ def constraint_targets():
     out['ohc'] = lambda x: norm.pdf(x,loc=396/0.91,scale=67/0.91)
     out['T 2081-2100'] = lambda x: skewnorm.pdf(x,2.20496701,loc=1.4124379,scale=0.60080822)
     return out
-
-def fit_priors(df_configs,exclude=[]):
-    # Prior density functions
-    distributions = {}
-    cols = df_configs.columns
-    for col in cols:
-        fit = Fitter(df_configs[col].to_numpy(),distributions=["norm","gamma","uniform"])
-        fit.fit(progress=False)
-        best = fit.get_best(method = 'sumsquare_error')
-        for dist in best.keys():
-            distributions[col] = {'distribution':dist,'params':tuple(best[dist].values())}
-    gamma_params = np.stack([distributions[col]['params'] for col in cols if distributions[col]['distribution'] == 'gamma' and col not in exclude])
-    norm_params = np.stack([distributions[col]['params'] for col in cols if distributions[col]['distribution'] == 'norm' and col not in exclude])
-    uniform_params = np.array([distributions[col]['params'] for col in cols if distributions[col]['distribution'] == 'uniform' and col not in exclude])
-    is_gamma = np.array([distributions[col]['distribution'] == 'gamma' for col in cols if col not in exclude], dtype=bool)
-    is_norm = np.array([distributions[col]['distribution'] == 'norm' for col in cols if col not in exclude], dtype=bool)
-    is_uniform = np.array([distributions[col]['distribution'] == 'uniform' for col in cols if col not in exclude], dtype=bool)
-    is_gamma_indices = np.where(is_gamma)[0]
-    is_norm_indices = np.where(is_norm)[0]
-    is_uniform_indices = np.where(is_uniform)[0]
-    #fun = lambda x: np.prod(uniform.pdf(x[is_uniform],uniform_params[:,0],uniform_params[:,1])) * np.prod(gamma.pdf(x[is_gamma],gamma_params[:,0],gamma_params[:,1],gamma_params[:,2])) * np.prod(norm.pdf(x[is_norm],norm_params[:,0],norm_params[:,1]))
-    vec = np.full(len(cols)-len(exclude),np.nan)
-    def fun(x):
-        np.put(vec,is_gamma_indices,gamma.pdf(x[is_gamma],gamma_params[:,0],gamma_params[:,1],gamma_params[:,2]))
-        np.put(vec,is_norm_indices,norm.pdf(x[is_norm],norm_params[:,0],norm_params[:,1]))
-        np.put(vec,is_uniform_indices,uniform.pdf(x[is_uniform],uniform_params[:,0],uniform_params[:,1]))
-        return vec
-    return fun, distributions
     
-def get_prior():
-    '''
-    df = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/calibrations/4xCO2_cummins_ebm3_cmip6.csv")
-    models = df["model"].unique()
-    n_models = len(models)
-    params = {}
-    multi_runs = {
-    "GISS-E2-1-G": "r1i1p1f1",
-    "GISS-E2-1-H": "r1i1p3f1",
-    "MRI-ESM2-0": "r1i1p1f1",
-    "EC-Earth3": "r3i1p1f1",
-    "FIO-ESM-2-0": "r1i1p1f1",
-    "CanESM5": "r1i1p2f1",
-    "FGOALS-f3-L": "r1i1p1f1",
-    "CNRM-ESM2-1": "r1i1p1f2",
-    }
-    params["gamma"] = np.full(n_models,np.nan)
-    params["c1"] = np.full(n_models,np.nan)
-    params["c2"] = np.full(n_models,np.nan)
-    params["c3"] = np.full(n_models,np.nan)
-    params["kappa1"] = np.full(n_models,np.nan)
-    params["kappa2"] = np.full(n_models,np.nan)
-    params["kappa3"] = np.full(n_models,np.nan)
-    params["epsilon"] = np.full(n_models,np.nan)
-    params["sigma_eta"] = np.full(n_models,np.nan)
-    params["sigma_xi"] = np.full(n_models,np.nan)
-    params[r"F_4xCO2"] = np.full(n_models,np.nan)
-    
-    for im, model in enumerate(models):
-        if model in multi_runs:
-            condition = (df["model"] == model) & (df["run"] == multi_runs[model])
-        else:
-            condition = df["model"] == model
-        params[r"gamma"][im] = df.loc[condition, "gamma"].values[0]
-        params["c1"][im], params["c2"][im], params["c3"][im] = df.loc[
-            condition, "C1":"C3"
-        ].values.squeeze()
-        (
-            params["kappa1"][im],
-            params["kappa2"][im],
-            params["kappa3"][im],
-        ) = df.loc[condition, "kappa1":"kappa3"].values.squeeze()
-        params["epsilon"][im] = df.loc[condition, "epsilon"].values[0]
-        params["sigma_eta"][im] = df.loc[condition, "sigma_eta"].values[0]
-        params["sigma_xi"][im] = df.loc[condition, "sigma_xi"].values[0]
-        params[r"F_4xCO2"][im] = df.loc[condition, "F_4xCO2"].values[0]
-    params = pd.DataFrame(params)
-    # Remove unphysical parameter combinations
-    params[params <= 0] = np.nan
-    params['gamma'][params['gamma'] <= 0.8] = np.nan
-    params['c1'][params['c1'] <= 2] = np.nan
-    params['c2'][params['c2'] <= params['c1']] = np.nan
-    params['c3'][params['c3'] <= params['c2']] = np.nan
-    params['kappa1'][params['kappa1'] <= 0.3] = np.nan
-    params = params[params.notna().all(axis=1)]
-    
-    # Check that covariance matrix is positive semidefinite
-    keep = np.full(len(params),True,dtype=bool)
-    for i in range(len(params)):
-        ebm = EnergyBalanceModel(
-            ocean_heat_capacity=params.iloc[i,[1,2,3]],
-            ocean_heat_transfer=params.iloc[i,[4,5,6]],
-            deep_ocean_efficacy=params.iloc[i,7],
-            gamma_autocorrelation=params.iloc[i,0],
-            sigma_xi=params.iloc[i,9],
-            sigma_eta=params.iloc[i,8],
-            forcing_4co2=params.iloc[i,10],
-            stochastic_run=True,
-        )
-        eb_matrix = ebm._eb_matrix()
-        q_mat = np.zeros((4, 4))
-        q_mat[0, 0] = ebm.sigma_eta**2
-        q_mat[1, 1] = (ebm.sigma_xi / ebm.ocean_heat_capacity[0]) ** 2
-        h_mat = np.zeros((8, 8))
-        h_mat[:4, :4] = -eb_matrix
-        h_mat[:4, 4:] = q_mat
-        h_mat[4:, 4:] = eb_matrix.T
-        g_mat = expm(h_mat)
-        q_mat_d = g_mat[4:, 4:].T @ g_mat[:4, 4:]
-        if not np.all(eigh(q_mat_d,eigvals_only=True) > 0):
-            keep[i] = False
-    params = params[keep]
-    '''
+def get_prior(included):
     # Kernel density estimation for climate response parameters
-    df = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/climate_response_ebm3.csv")
-    climate_response_d = gaussian_kde(df.T)
+    df_cr = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/climate_response_ebm3.csv")
+    for param in df_cr.columns:
+        if param  not in included:
+            df_cr.drop(labels=param,axis='columns',inplace=True)
+    cr_d = gaussian_kde(df_cr.T) if len(df_cr.columns) != 0 else lambda x: 1
     
-    # Kernel density estimation for parameters r0, rU, rT and rA
-    df = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/carbon_cycle.csv")
-    carbon_cycle_d = gaussian_kde(df.T)
+    # Kernel density estimation for carbon cycle parameters
+    df_cc = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/carbon_cycle.csv")
+    for param in df_cc.columns:
+        if param not in included:
+            df_cc.drop(labels=param,axis='columns',inplace=True)
+    cc_d = gaussian_kde(df_cc.T) if len(df_cc.columns) != 0 else lambda x: 1
     
     # Aerosol-radiation interaction parameters
-    df = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/aerosol_radiation.csv")
-    # Ignore carbon monoxide
-    df.drop(labels='CO',axis='columns',inplace=True)
-    min_values, max_values = df.min(axis=0).to_numpy(), df.max(axis=0).to_numpy()
-    lenghts = max_values - min_values
-    ari_d = lambda x: np.prod(uniform.pdf(x,min_values-0.05*lenghts,1.1*lenghts))
+    df_ari = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/aerosol_radiation.csv")
+    df_ari.drop(labels='CO',axis='columns',inplace=True)
+    for param in df_ari.columns:
+        if 'ari ' + param  not in included:
+            df_ari.drop(labels=param,axis='columns',inplace=True)
+    if len(df_ari.columns) != 0:
+        min_values, max_values = df_ari.min(axis=0).to_numpy(), df_ari.max(axis=0).to_numpy()
+        lengths = max_values - min_values
+        ari_d = lambda x: np.prod(uniform.pdf(x,min_values-0.05*lengths,1.1*lengths))
+    else:
+        ari_d = lambda x: 1
     
-    # Aerosol-clound interaction parameters
-    df = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/aerosol_cloud.csv")
-    aci_d = gaussian_kde(df.T)
+    # Aerosol-cloud interaction parameters
+    df_aci = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/aerosol_cloud.csv")
+    def converter(s):
+        if s == 'beta':
+            return s
+        shape, substance = s.split('_')
+        if substance == 'so2':
+            substance = 'Sulfur'
+        else:
+            substance = substance.upper()
+        return shape + ' ' + substance
+    for param in df_aci.columns:
+        if converter(param) not in included:
+            df_aci.drop(labels=param,axis='columns',inplace=True)
+    aci_d = gaussian_kde(df_aci.T) if len(df_aci.columns) != 0 else lambda x: 1
     
     # Ozone interaction parameters
-    df = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/ozone.csv")
-    ozone_d = gaussian_kde(df.T)
+    df_o3 = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/ozone.csv")
+    for param in df_o3.columns:
+        if 'o3 ' + param  not in included:
+            df_o3.drop(labels=param,axis='columns',inplace=True)
+    o3_d = gaussian_kde(df_o3.T) if len(df_o3.columns) != 0 else lambda x: 1
     
     # Kernel-density estimation for scaling factor parameters
-    df = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/forcing_scaling.csv")
-    scaling_d = gaussian_kde(df.T)
+    df_scaling = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/forcing_scaling.csv")
+    for param in df_scaling.columns:
+        if param == 'solar_amplitude' and param not in included:
+            df_scaling.drop(labels=param,axis='columns',inplace=True)
+        elif param == 'solar_trend' and param not in included:
+            df_scaling.drop(labels=param,axis='columns',inplace=True)
+        elif 'scale ' + param not in included and param not in ['solar_amplitude', 'solar_trend']:
+            df_scaling.drop(labels=param,axis='columns',inplace=True)
+    scaling_d = gaussian_kde(df_scaling.T) if len(df_scaling.columns) != 0 else lambda x: 1
     
-    df = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/co2_concentration_1750.csv")
-    co2conc_d = gaussian_kde(df.T)
+    # CO2 concetrnation at the beginning (year 1750)
+    df_co2 = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/co2_concentration_1750.csv")
+    for param in df_co2.columns:
+        if param + '_1750' not in included:
+            df_co2.drop(labels=param,axis='columns',inplace=True)
+    co2conc_d = gaussian_kde(df_co2.T) if len(df_co2.columns) != 0 else lambda x: 1
+    N_params = [len(df_cr.columns),len(df_cc.columns),len(df_ari.columns),len(df_aci.columns),len(df_o3.columns),len(df_scaling.columns),len(df_co2.columns)]
     
-    prior = lambda x: float(climate_response_d(x[:11]) * carbon_cycle_d(x[11:15]) * ari_d(x[15:24]) * aci_d(x[24:28]) * ozone_d(x[28:34]) * scaling_d(x[34:45]) * co2conc_d(x[45])) if len(x) == 46 else np.nan
+    if sum(N_params) != len(included):
+        raise ValueError(f'Number of parameters {sum(N_params)} in the prior mismatch the number {len(included)} of included parameters')
+    
+    prior = lambda x: float(cr_d(x[0:sum(N_params[:1])]) * cc_d(x[sum(N_params[:1]):sum(N_params[:2])]) * ari_d(x[sum(N_params[:2]):sum(N_params[:3])]) * \
+                            aci_d(x[sum(N_params[:3]):sum(N_params[:4])]) * o3_d(x[sum(N_params[:4]):sum(N_params[:5])]) * \
+                            scaling_d(x[sum(N_params[:5]):sum(N_params[:6])]) * co2conc_d(x[sum(N_params[:6]):sum(N_params[:7])]))
     return prior
 
 def read_temperature_data():
@@ -501,25 +433,23 @@ def constraint_posteriors():
     
     return {constraint: gaussian_kde(draws[0][constraint]) for constraint in constraints}
     
-def load_MC_samples(ds,N=None,tail=True):
+def load_MC_samples(ds,N_samples=None,N=None,tail=True):
+    N_samples = ds['sample'].size if N_samples is None else N_samples
     names = ds['param'][:]
     warmup = ds['warmup'][:]
-    chain = ds['chain'][:,:]
+    chain = ds['chain'][:N_samples,:]
     pos_configs = pd.DataFrame(columns=names)
     pos_samples = len(chain) - warmup
-    
     if N is None:
         N = pos_samples
     elif N > pos_samples:
-        msg = f'Number of tail samples {N} larger than the number of total posterior samples {pos_samples}'
-        raise ValueError(msg)
+        raise ValueError(f'Number of tail samples {N} larger than the number of total posterior samples {pos_samples}')
     if tail:
         pos_configs[names] = chain[-N:,:]
+        pos_configs['seed'] = ds['seeds'][-(N+ds['sample'].size-N_samples):N_samples]
     else:
         pos_configs[names] = chain[warmup:(warmup+N),:]
-    #pos_configs['sigma_eta'] = np.zeros(N)
-    #pos_configs['sigma_xi'] = np.zeros(N)
-    pos_configs['seed'] = ds['seeds'][warmup:(warmup+N)]
+        pos_configs['seed'] = ds['seeds'][warmup:(warmup+N)]
     return pos_configs
 
 def load_optimal_config(folder,scenario):
@@ -862,3 +792,63 @@ def run_1pctco2(df_configs):
 
     return tcre,tcr
 
+def compute_data_loss(model,data,var):
+    wss = np.sum(np.square(model-data)/var)
+    loss = 0.5 * (wss + np.sum(np.log(2*np.pi*var)))
+    return loss
+
+def compute_constrained_loss(constraints,targets,weights=None):
+    names = ['ecs','tcr','T 1995-2014','ari','aci','aer', 'CO2', 'ohc', 'T 2081-2100']
+    densities = np.array([targets[constraint](constraints[i]) for i, constraint in enumerate(names)])
+    if weights is None:
+        weights = np.ones(len(names))
+    return np.sum(-np.log(densities) * weights) if np.all(densities) != 0.0 else np.inf
+
+def compute_prior_loss(prior_fun,x):
+    prior_density_value = prior_fun(x)
+    return -np.log(prior_density_value) if prior_density_value != 0.0 else np.inf
+
+def compute_constraints(fair):
+    out = np.full(9,np.nan)
+    # Equilibrium climate sensitivity
+    out[0] = float(fair.ebms.ecs.to_numpy())
+    # Transient climate response
+    out[1] = float(fair.ebms.tcr.to_numpy())
+    # Average temperarature between years 1995-2014 referenced with temperature between years 1850-1901   
+    out[2] = float(fair.temperature.loc[dict(timebounds=slice(1996,2015),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy() -
+                   fair.temperature.loc[dict(timebounds=slice(1851,1901),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy())
+    # Average aerosol-radiation interactions between 2005-2014 compared to the year 1750
+    out[3] = float(fair.forcing.loc[dict(timebounds=slice(2006,2015),scenario='ssp245',specie='Aerosol-radiation interactions')].mean(dim='timebounds').to_numpy() -
+                   fair.forcing.loc[dict(timebounds=1750,scenario='ssp245',specie='Aerosol-radiation interactions')].to_numpy().squeeze())
+    # Average aerosol-cloud interactions between 2005-2014
+    out[4] = float(fair.forcing.loc[dict(timebounds=slice(2006,2015),scenario='ssp245',specie='Aerosol-cloud interactions')].mean(dim='timebounds').to_numpy() - 
+                   fair.forcing.loc[dict(timebounds=1750,scenario='ssp245',specie='Aerosol-cloud interactions')].to_numpy().squeeze())
+    # Total aerosol interaction
+    out[5] = out[3] + out[4]
+    # CO2 concentration in year 2014
+    out[6] = float(fair.concentration.loc[dict(timebounds=2015,scenario='ssp245',specie='CO2')].to_numpy().squeeze())
+    # Ocean heat content change between a year 1971 and a year 2018
+    out[7] = float(fair.ocean_heat_content_change.loc[dict(timebounds=2019,scenario='ssp245')].to_numpy() -
+                   fair.ocean_heat_content_change.loc[dict(timebounds=1972,scenario='ssp245')].to_numpy()) / 1e21
+    # Average temperature between years 2081-2100 compared with temperature from years 1995-2014 using scenario ssp245
+    out[8] = float(fair.temperature.loc[dict(timebounds=slice(2082,2101),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy() -
+                   fair.temperature.loc[dict(timebounds=slice(1996,2015),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy())
+    return out
+
+def loss(x,config,params,data,var,model_var=0.0,prior=None,constraint_targets=None,scenario='ssp245'):
+    solar_forcing, volcanic_forcing, emissions = load_data(scenario,1,1750,2101)
+    var = var + model_var
+    fair = runFaIR(solar_forcing,volcanic_forcing,emissions,config,scenario,
+                   start=1750,end=2101)
+    config[params] = x
+    # Temperature anomaly compared to temperature mean between year 1850 and 1900
+    anomaly = fair.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0).to_numpy().squeeze() \
+            - fair.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
+    S = 0.0
+    S += compute_data_loss(anomaly, data, var)
+    if prior is not None:
+        S += compute_prior_loss(prior, x)
+    if constraint_targets is not None:
+        constraints = compute_constraints(fair)
+        S += compute_constrained_loss(constraints,constraint_targets)
+    return S

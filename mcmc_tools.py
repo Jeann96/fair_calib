@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Wed Feb 22 15:18:44 2023
+Created on Wed Feb 22 2023
 
 @author: nurmelaj
 """
 
 import numpy as np
 from scipy.linalg import expm, eigh
-import pandas as pd
 import time
-from fair_tools import load_data, runFaIR, read_temperature_data, constraint_targets
+from fair_tools import load_data,runFaIR,read_temperature_data,constraint_targets,load_configs,compute_data_loss,compute_prior_loss,compute_constrained_loss,compute_constraints
 from fair.energy_balance_model import EnergyBalanceModel
 from netCDF4 import Dataset
 import os
@@ -50,50 +49,7 @@ def validate_config(config,bounds=None):
     else:
         in_bounds = True
     return positive & physical & positive_definite & in_bounds
-
-def compute_constraints(fair):
-    out = np.full(9,np.nan)
-    # Equilibrium climate sensitivity
-    out[0] = float(fair.ebms.ecs.to_numpy())
-    # Transient climate response
-    out[1] = float(fair.ebms.tcr.to_numpy())
-    # Average temperarature between years 1995-2014 referenced with temperature between years 1850-1901   
-    out[2] = float(fair.temperature.loc[dict(timebounds=slice(1996,2015),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy() -
-                   fair.temperature.loc[dict(timebounds=slice(1851,1901),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy())
-    # Average aerosol-radiation interactions between 2005-2014 compared to the year 1750
-    out[3] = float(fair.forcing.loc[dict(timebounds=slice(2006,2015),scenario='ssp245',specie='Aerosol-radiation interactions')].mean(dim='timebounds').to_numpy() -
-                   fair.forcing.loc[dict(timebounds=1750,scenario='ssp245',specie='Aerosol-radiation interactions')].to_numpy().squeeze())
-    # Average aerosol-cloud interactions between 2005-2014
-    out[4] = float(fair.forcing.loc[dict(timebounds=slice(2006,2015),scenario='ssp245',specie='Aerosol-cloud interactions')].mean(dim='timebounds').to_numpy() - 
-                   fair.forcing.loc[dict(timebounds=1750,scenario='ssp245',specie='Aerosol-cloud interactions')].to_numpy().squeeze())
-    # Total aerosol interaction
-    out[5] = out[3] + out[4]
-    # CO2 concentration in year 2014
-    out[6] = float(fair.concentration.loc[dict(timebounds=2015,scenario='ssp245',specie='CO2')].to_numpy().squeeze())
-    # Ocean heat content change between a year 1971 and a year 2018
-    out[7] = float(fair.ocean_heat_content_change.loc[dict(timebounds=2019,scenario='ssp245')].to_numpy() -
-                   fair.ocean_heat_content_change.loc[dict(timebounds=1972,scenario='ssp245')].to_numpy()) / 1e21
-    # Average temperature between years 2081-2100 compared with temperature from years 1995-2014 using scenario ssp245
-    out[8] = float(fair.temperature.loc[dict(timebounds=slice(2082,2101),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy() -
-                   fair.temperature.loc[dict(timebounds=slice(1996,2015),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy())
-    return out
     
-def compute_constrained_loss(constraints,targets,weights=None):
-    names = ['ecs','tcr','T 1995-2014','ari','aci','aer', 'CO2', 'ohc', 'T 2081-2100']
-    densities = np.array([targets[constraint](constraints[i]) for i, constraint in enumerate(names)])
-    if weights is None:
-        weights = np.ones(len(names))
-    return np.sum(-np.log(densities) * weights) if np.all(densities) != 0.0 else np.inf
-
-def compute_prior_loss(prior_fun,x):
-    prior_density_value = prior_fun(x)
-    return -np.log(prior_density_value) if prior_density_value != 0.0 else np.inf
-
-def compute_data_loss(model,data,var):
-    wss = np.sum(np.square(model-data)/var)
-    loss = 0.5 * (wss + np.sum(np.log(2*np.pi*var)))
-    return loss
-
 def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds=None,use_constraints=True,model_var=None,
              folder='MC_results',filename='sampling'):
     # Read data
@@ -103,14 +59,13 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
     data, var = T_data.data, T_std.data**2
     if model_var is not None:
         var = var + model_var
-    ydim = len(data)
+    #ydim = len(data)
     # Run the first fair
     fair = runFaIR(solar_forcing,volcanic_forcing,emissions,init_config,scenario,
                    start=1750,end=2101)
     # Temperature anomaly compared to temperature mean between year 1850 and 1900
     anomaly = fair.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0).to_numpy().squeeze() \
             - fair.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
-    
     # proposal fair configuration
     proposal_config = init_config.copy()
     progress, accepted = 0, 0
@@ -260,7 +215,11 @@ def mcmc_extend(scenario, samples, prior=None, bounds=None, use_constraints=True
     
     x = chain[-1,:]
     constraints = constraints_chain[-1,:]
-    config = pd.DataFrame(data=x.tolist()+[seed_chain[-1]],index=params+['seed']).transpose()
+    prior_configs = load_configs()
+    config = prior_configs.median(axis=0).to_frame().transpose()
+    config['seed'] = seed_chain[-1]
+    config[params] = x 
+    #config = pd.DataFrame(data=x.tolist()+[seed_chain[-1]],index=params+['seed']).transpose()
     loss = loss_chain[-1]
     prior_loss = prior_loss_chain[-1]
     data_loss = data_loss_chain[-1]
@@ -273,7 +232,8 @@ def mcmc_extend(scenario, samples, prior=None, bounds=None, use_constraints=True
     MAP_index = np.argmin(loss_chain)
     loss_MAP = loss_chain[MAP_index]
     MAP = chain[MAP_index,:]
-    MAP_config = pd.DataFrame(data=MAP.tolist()+[seed_chain[MAP_index]],index=params+['seed']).transpose()
+    MAP_config = config.copy()
+    MAP_config[params] = MAP
 
     # Extend chains    
     chain = np.append(chain, np.full((samples,xdim),np.nan), axis=0)
