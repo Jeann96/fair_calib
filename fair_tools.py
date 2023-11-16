@@ -8,24 +8,41 @@ Created on Thu Feb 16 2023
 
 import pandas as pd
 import numpy as np
+import numpy.random as npr
 import xarray as xr
 import warnings
 from scipy.stats import norm, uniform, skewnorm, gaussian_kde
 from fair import FAIR
 from fair.io import read_properties
 from fair.interface import fill, initialise
-from netCDF4 import Dataset
 import os
-from dotenv import load_dotenv
 cwd = os.getcwd()
-load_dotenv()
+#from dotenv import load_dotenv
+#load_dotenv()
+#cal_v = os.getenv("CALIBRATION_VERSION")
+#fair_v = os.getenv("FAIR_VERSION")
+#constraint_set = os.getenv("CONSTRAINT_SET")
+#output_ensemble_size = int(os.getenv("POSTERIOR_SAMPLES"))
+#plots = os.getenv("PLOTS", "False").lower() in ("true", "1", "t")
 
-cal_v = os.getenv("CALIBRATION_VERSION")
-fair_v = os.getenv("FAIR_VERSION")
-constraint_set = os.getenv("CONSTRAINT_SET")
-output_ensemble_size = int(os.getenv("POSTERIOR_SAMPLES"))
-plots = os.getenv("PLOTS", "False").lower() in ("true", "1", "t")
 fair_calibration_dir=f"{cwd}/fair-calibrate"
+
+def load_dotenv():
+    f = open('.env','r')
+    out = {}
+    for line in f:
+        if '=' not in line:
+            continue
+        variable, value = line.split(' ')[0].split('=')
+        out[variable] = value.strip('\n')
+    f.close()
+    return out
+
+out = load_dotenv()
+cal_v = out["CALIBRATION_VERSION"]
+fair_v = out["FAIR_VERSION"]
+constraint_set = out["CONSTRAINT_SET"]
+output_ensemble_size = int(out["POSTERIOR_SAMPLES"])
 
 def load_data(scenario,nconfigs,start,end):
     '''
@@ -53,7 +70,9 @@ def load_data(scenario,nconfigs,start,end):
     df_volcanic = pd.read_csv(f"{fair_calibration_dir}/data/forcing/volcanic_ERF_monthly_-950001-201912.csv",
                               index_col='year')
     volcanic_forcing = np.zeros(end-start+1)
-    df_volcanic = df_volcanic[(start-1):]
+    
+    #df_volcanic = df_volcanic[(start-1):]
+    df_volcanic = df_volcanic[(start - 1 ) < df_volcanic.index]
     L = end - start + 1
     volcanic_forcing = np.zeros(L)
     # Last year in the volcanic forcing data
@@ -73,25 +92,50 @@ def load_data(scenario,nconfigs,start,end):
     emissions = fe.drop("config") * np.ones((1, nconfigs, 1))
     return solar_forcing, volcanic_forcing, emissions
 
-def load_configs():
+def get_param_names():
+    df = pd.read_csv(f"{fair_calibration_dir}/output/fair-{fair_v}/v{cal_v}/{constraint_set}/"
+                       "posteriors/calibrated_constrained_parameters.csv",index_col=0,nrows=0)
+    df.rename({'co2_concentration_1750': 'CO2 concentration 1750'},axis='columns',inplace=True)
+    return df.columns.tolist()
+
+def load_calib_samples():
     df = pd.read_csv(f"{fair_calibration_dir}/output/fair-{fair_v}/v{cal_v}/{constraint_set}/"
                      "posteriors/calibrated_constrained_parameters.csv",
                      index_col=0)
+    df.rename({'co2_concentration_1750': 'CO2 concentration 1750'},axis='columns',inplace=True)
     return df
 
 def constraint_ranges():
     out = {}
-    out['ecs'] = (0,8)
-    out['tcr'] = (0,4)
-    out['T 1995-2014'] = (0.5,1.3)
-    out['ari'] = (-1.0,0.3)
-    out['aci'] = (-2.25, 0.25)
+    out['ecs'] = (1.0,7.0)
+    out['tcr'] = (0.5,3.5)
+    out['T 1995-2014'] = (0.5,1.2)
+    out['ari'] = (-1.0,0.4)
+    out['aci'] = (-2.25, 0.1)
     out['aer'] = (-3, 0)
-    out['CO2'] = (394, 402)
+    out['CO2'] = (396, 400)
     out['ohc'] = (0, 800)
-    out['T 2081-2100'] = (0.8, 3.2)
+    out['T 2081-2100'] = (0.7, 3.2)
     return out
 
+def get_param_ranges():
+    return {'gamma': (0.0,25.0), 'c1': (2.0,7.0), 'c2':(0.0,50.0), 'c3':(0.0,250.0),
+            'kappa1': (0.5,2.5), 'kappa2': (0.0,7.0), 'kappa3': (0.0,2.0), 'epsilon': (0.0,2.5),
+            'sigma_eta': (0.0,2.5),'sigma_xi':(0.0,1.0),'F_4xCO2':(5.0,12.0),'r0':(20.0,45.0),
+            'rU': (-0.01,0.02),'rT': (-2.5,7.5),'rA':(-0.005,0.008),'ari BC':(0.0,0.042),
+            'ari CH4': (-4.54e-6,0.0),'ari N2O': (-7.27e-5,0.0), 'ari NH3': (-0.00113,0.0),
+            'ari NOx': (-0.000135,0.0),'ari OC': (-0.00792,0.0), 'ari Sulfur': (-0.005725,0.0),
+            'ari VOC': (-3.2e-5,0.0),'ari Equivalent effective stratospheric chlorine': (-1.5072e-5,0.0),
+            'shape Sulfur': (0.0,0.05), 'shape BC': (0.0,0.7), 'shape OC': (0.0,0.05),'beta':(-3.0,0.0),
+            'o3 CH4': (-7e-6,4e-4),'o3 N2O': (-1e-4,1.5e-3),
+            'o3 Equivalent effective stratospheric chlorine': (-3.5e-4,1e-4),
+            'o3 CO': (-1e-4,4e-4),'o3 VOC': (-4e-4,9e-4),'o3 NOx': (0.0,0.004), 'scale CH4': (0.5,1.5),
+            'scale N2O': (0.7,1.3), 'scale minorGHG': (0.6,1.4), 'scale Stratospheric water vapour': (-0.5,2.5),
+            'scale Contrails': (-0.2,2.2),'scale Light absorbing particles on snow and ice': (-0.6,2.6),
+            'scale Land use': (0.0,2.0),'scale Volcanic': (0.5,1.5), 'solar_amplitude': (0.0,2.0), 
+            'solar_trend': (-0.11,0.11),'scale CO2': (0.75,1.25), 'CO2 concentration 1750': (272,283), 
+            'seed': (0,int(6e8))}
+    
 def constraint_priors():
     out = {}
     temp = np.load(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/prior_runs/temperature_1850-2101.npy")
@@ -126,8 +170,29 @@ def constraint_targets():
     out['ohc'] = lambda x: norm.pdf(x,loc=396/0.91,scale=67/0.91)
     out['T 2081-2100'] = lambda x: skewnorm.pdf(x,2.20496701,loc=1.4124379,scale=0.60080822)
     return out
+
+def load_prior_samples():
+    # Read and rename dataframes
+    df_cr = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/climate_response_ebm3.csv")
+    df_cc = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/carbon_cycle.csv")
+    df_ari = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/aerosol_radiation.csv")
+    df_ari.drop(labels='CO',axis='columns',inplace=True)
+    df_ari.rename({col: f'ari {col}' for col in df_ari.columns},axis='columns',inplace=True)
+    df_aci = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/aerosol_cloud.csv")
+    df_aci.rename({col: f"shape {col.split('_')[-1].upper()}" for col in df_aci.columns if 'shape' in col},axis='columns',inplace=True)
+    df_aci.rename({'shape SO2': "shape Sulfur"},axis='columns',inplace=True)
+    df_o3 = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/ozone.csv")
+    df_o3.rename({col: f"o3 {col}" for col in df_o3.columns},axis='columns',inplace=True)
+    df_scaling = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/forcing_scaling.csv")
+    df_scaling.rename({col: f'scale {col}' for col in df_scaling.columns if 'solar' not in col},axis='columns',inplace=True)
+    df_co2 = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/co2_concentration_1750.csv")
+    df_co2.rename({'co2_concentration': 'CO2 concentration 1750'},axis='columns',inplace=True)
+    # Concatenate dataframes
+    df = pd.concat((df_cr,df_cc,df_ari,df_aci,df_o3,df_scaling,df_co2),axis='columns')
+    return df
     
 def get_prior(included):
+    param_ranges = get_param_ranges()
     # Kernel density estimation for climate response parameters
     df_cr = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/climate_response_ebm3.csv")
     for param in df_cr.columns:
@@ -145,58 +210,49 @@ def get_prior(included):
     # Aerosol-radiation interaction parameters
     df_ari = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/aerosol_radiation.csv")
     df_ari.drop(labels='CO',axis='columns',inplace=True)
+    df_ari.rename({col: f'ari {col}' for col in df_ari.columns},axis='columns',inplace=True)
     for param in df_ari.columns:
-        if 'ari ' + param  not in included:
+        if param  not in included:
             df_ari.drop(labels=param,axis='columns',inplace=True)
     if len(df_ari.columns) != 0:
-        min_values, max_values = df_ari.min(axis=0).to_numpy(), df_ari.max(axis=0).to_numpy()
-        lengths = max_values - min_values
-        ari_d = lambda x: np.prod(uniform.pdf(x,min_values-0.05*lengths,1.1*lengths))
+        bounds = np.array([param_ranges[param] for param in df_ari.columns])
+        ari_d = lambda x: np.prod(uniform.pdf(x,loc=bounds[:,0],scale=bounds[:,1]-bounds[:,0]))
     else:
         ari_d = lambda x: 1
     
     # Aerosol-cloud interaction parameters
     df_aci = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/aerosol_cloud.csv")
-    def converter(s):
-        if s == 'beta':
-            return s
-        shape, substance = s.split('_')
-        if substance == 'so2':
-            substance = 'Sulfur'
-        else:
-            substance = substance.upper()
-        return shape + ' ' + substance
+    df_aci.rename({col: f"shape {col.split('_')[-1].upper()}" for col in df_aci.columns if 'shape' in col},axis='columns',inplace=True)
+    df_aci.rename({'shape SO2': "shape Sulfur"},axis='columns',inplace=True)
     for param in df_aci.columns:
-        if converter(param) not in included:
+        if param not in included:
             df_aci.drop(labels=param,axis='columns',inplace=True)
     aci_d = gaussian_kde(df_aci.T) if len(df_aci.columns) != 0 else lambda x: 1
     
     # Ozone interaction parameters
     df_o3 = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/ozone.csv")
+    df_o3.rename({col: f"o3 {col}" for col in df_o3.columns},axis='columns',inplace=True)
     for param in df_o3.columns:
-        if 'o3 ' + param  not in included:
+        if param  not in included:
             df_o3.drop(labels=param,axis='columns',inplace=True)
     o3_d = gaussian_kde(df_o3.T) if len(df_o3.columns) != 0 else lambda x: 1
     
-    # Kernel-density estimation for scaling factor parameters
+    # Scaling factor parameters
     df_scaling = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/forcing_scaling.csv")
+    df_scaling.rename({col: f'scale {col}' for col in df_scaling.columns if 'solar' not in col},axis='columns',inplace=True)
     for param in df_scaling.columns:
-        if param == 'solar_amplitude' and param not in included:
-            df_scaling.drop(labels=param,axis='columns',inplace=True)
-        elif param == 'solar_trend' and param not in included:
-            df_scaling.drop(labels=param,axis='columns',inplace=True)
-        elif 'scale ' + param not in included and param not in ['solar_amplitude', 'solar_trend']:
+        if param not in included:
             df_scaling.drop(labels=param,axis='columns',inplace=True)
     scaling_d = gaussian_kde(df_scaling.T) if len(df_scaling.columns) != 0 else lambda x: 1
     
-    # CO2 concetrnation at the beginning (year 1750)
+    # CO2 concentration on year 1750
     df_co2 = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/co2_concentration_1750.csv")
+    df_co2.rename({'co2_concentration': 'CO2 concentration 1750'},axis='columns',inplace=True)
     for param in df_co2.columns:
-        if param + '_1750' not in included:
+        if param not in included:
             df_co2.drop(labels=param,axis='columns',inplace=True)
     co2conc_d = gaussian_kde(df_co2.T) if len(df_co2.columns) != 0 else lambda x: 1
     N_params = [len(df_cr.columns),len(df_cc.columns),len(df_ari.columns),len(df_aci.columns),len(df_o3.columns),len(df_scaling.columns),len(df_co2.columns)]
-    
     if sum(N_params) != len(included):
         raise ValueError(f'Number of parameters {sum(N_params)} in the prior mismatch the number {len(included)} of included parameters')
     
@@ -223,7 +279,7 @@ def read_temperature_data():
     T_std = T_data.std(dim='realization')
     return T_mean, T_std
 
-def constraint_posteriors():
+def resample_constraint_posteriors(N=10**5):
     NINETY_TO_ONESIGMA = norm.ppf(0.95)
     valid_temp = np.loadtxt(
         f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/posteriors/"
@@ -271,15 +327,15 @@ def constraint_posteriors():
     constraints = ["ecs","tcr","ohc","T 1995-2014","ari","aci","aer","CO2","T 2081-2100"]
     
     samples = {}
-    samples["ecs"] = skewnorm.rvs(8.82185594, loc=1.95059779, scale=1.55584604, size=10**5, random_state=91603)
-    samples["tcr"] = norm.rvs(loc=1.8, scale=0.6 / NINETY_TO_ONESIGMA, size=10**5, random_state=18196)
-    samples["ohc"] = norm.rvs(loc=396 / 0.91, scale=67 / 0.91, size=10**5, random_state=43178)
-    samples["T 1995-2014"] = skewnorm.rvs(-1.65506091, loc=0.92708099, scale=0.12096636, size=10**5, random_state=19387)
-    samples["ari"] = norm.rvs(loc=-0.3, scale=0.3 / NINETY_TO_ONESIGMA, size=10**5, random_state=70173)
-    samples["aci"] = norm.rvs(loc=-1.0, scale=0.7 / NINETY_TO_ONESIGMA, size=10**5, random_state=91123)
-    samples["aer"] = norm.rvs(loc=-1.3,scale=np.sqrt(0.7**2 + 0.3**2) / NINETY_TO_ONESIGMA,size=10**5,random_state=3916153)
-    samples["CO2"] = norm.rvs(loc=397.5469792683919, scale=0.36, size=10**5, random_state=81693)
-    samples["T 2081-2100"] = skewnorm.rvs(2.20496701, loc=1.4124379, scale=0.60080822, size=10**5, random_state=801693589)
+    samples["ecs"] = skewnorm.rvs(8.82185594, loc=1.95059779, scale=1.55584604, size=N, random_state=91603)
+    samples["tcr"] = norm.rvs(loc=1.8, scale=0.6 / NINETY_TO_ONESIGMA, size=N, random_state=18196)
+    samples["ohc"] = norm.rvs(loc=396 / 0.91, scale=67 / 0.91, size=N, random_state=43178)
+    samples["T 1995-2014"] = skewnorm.rvs(-1.65506091, loc=0.92708099, scale=0.12096636, size=N, random_state=19387)
+    samples["ari"] = norm.rvs(loc=-0.3, scale=0.3 / NINETY_TO_ONESIGMA, size=N, random_state=70173)
+    samples["aci"] = norm.rvs(loc=-1.0, scale=0.7 / NINETY_TO_ONESIGMA, size=N, random_state=91123)
+    samples["aer"] = norm.rvs(loc=-1.3,scale=np.sqrt(0.7**2 + 0.3**2) / NINETY_TO_ONESIGMA,size=N,random_state=3916153)
+    samples["CO2"] = norm.rvs(loc=397.5469792683919, scale=0.36, size=N, random_state=81693)
+    samples["T 2081-2100"] = skewnorm.rvs(2.20496701, loc=1.4124379, scale=0.60080822, size=N, random_state=801693589)
 
     ar_distributions = {}
     for constraint in constraints:
@@ -425,42 +481,37 @@ def constraint_posteriors():
 
     assert effective_samples >= output_ensemble_size
 
-    draws = []
-    drawn_samples = accepted.sample(
-        n=output_ensemble_size, replace=False, weights=weights, random_state=10099
-    )
-    draws.append((drawn_samples))
+    drawn_samples = accepted.sample(n=output_ensemble_size,replace=False,weights=weights,random_state=10099)
+    drawn_samples.reset_index(inplace=True)
+    return drawn_samples
     
-    return {constraint: gaussian_kde(draws[0][constraint]) for constraint in constraints}
-    
-def load_MC_samples(ds,N_samples=None,N=None,tail=True):
-    N_samples = ds['sample'].size if N_samples is None else N_samples
+def load_MC_samples(ds,N=None,tail=True,thinning=1,param_ranges=None):
+    #samples = ds['sample'].size
     names = ds['param'][:]
     warmup = ds['warmup'][:]
-    chain = ds['chain'][:N_samples,:]
-    pos_configs = pd.DataFrame(columns=names)
-    pos_samples = len(chain) - warmup
+    chain = ds['chain'][warmup:,:]
+    seeds = ds['seeds'][warmup:]
+    configs = pd.DataFrame(columns=names)
+    excluded = [param for param in param_ranges.keys() if param not in names]
+    total_samples = len(chain)
     if N is None:
-        N = pos_samples
-    elif N > pos_samples:
-        raise ValueError(f'Number of tail samples {N} larger than the number of total posterior samples {pos_samples}')
-    if tail:
-        pos_configs[names] = chain[-N:,:]
-        pos_configs['seed'] = ds['seeds'][-(N+ds['sample'].size-N_samples):N_samples]
+        N = total_samples // thinning
+        required_samples = total_samples * thinning
     else:
-        pos_configs[names] = chain[warmup:(warmup+N),:]
-        pos_configs['seed'] = ds['seeds'][warmup:(warmup+N)]
-    return pos_configs
-
-def load_optimal_config(folder,scenario):
-    ds = Dataset(f'{cwd}/{folder}/{scenario}/sampling.nc','r')
-    names = ds['param'][:]
-    MAP = ds['MAP'][:]
-    ds.close()
-    opt_config = load_configs().median(axis=0).to_frame().transpose()
-    opt_config['sigma_eta'], opt_config['sigma_xi'] = 0, 0
-    opt_config[names] = MAP
-    return opt_config
+        required_samples = N * thinning
+        if required_samples > total_samples:
+            raise ValueError(f'Number of required samples {required_samples} is larger than the number of total samples {total_samples}')
+    if tail:
+        configs[names] = chain[-required_samples::thinning,:]
+        configs['seed'] = seeds[-required_samples::thinning]
+    else:
+        configs[names] = chain[:required_samples,:][::thinning]
+        configs['seed'] = seeds[:required_samples][::thinning]
+    for param in excluded:
+        if param == 'seed':
+            continue
+        configs[param] = npr.uniform(min(param_ranges[param]),max(param_ranges[param]),size=N)
+    return configs
 
 def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
             start=1750, end=2020):
@@ -491,6 +542,8 @@ def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
     N = end - start + 1
     trend_shape = np.ones(N)
     trend_shape[:N] = np.linspace(0, 1, N)
+    
+   
 
     f = FAIR(ch4_method="Thornhill2021")
     f.define_time(start, end, 1)
@@ -531,9 +584,6 @@ def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
     # species level
     f.fill_species_configs()
     #f.fill_from_rcmip()
-    #print(f.concentration.loc[dict(timebounds=1750,specie='Aerosol-radiation interactions',scenario='ssp245')])
-    #print(f.concentration.loc[dict(specie='CO2')])
-    #raise ValueError
     
     # carbon cycle
     fill(f.species_configs["iirf_0"], df_configs["r0"].values.squeeze(), specie="CO2")
@@ -679,7 +729,7 @@ def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
     # initial condition of CO2 concentration (but not baseline for forcing calculations)
     fill(
         f.species_configs["baseline_concentration"],
-        df_configs["co2_concentration_1750"].values.squeeze(),
+        df_configs["CO2 concentration 1750"].values.squeeze(),
         specie="CO2",
     )
     
@@ -802,7 +852,7 @@ def compute_constrained_loss(constraints,targets,weights=None):
     densities = np.array([targets[constraint](constraints[i]) for i, constraint in enumerate(names)])
     if weights is None:
         weights = np.ones(len(names))
-    return np.sum(-np.log(densities) * weights) if np.all(densities) != 0.0 else np.inf
+    return -np.sum(np.log(densities) * weights) if np.all(densities) != 0.0 else np.inf
 
 def compute_prior_loss(prior_fun,x):
     prior_density_value = prior_fun(x)
@@ -834,21 +884,3 @@ def compute_constraints(fair):
     out[8] = float(fair.temperature.loc[dict(timebounds=slice(2082,2101),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy() -
                    fair.temperature.loc[dict(timebounds=slice(1996,2015),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy())
     return out
-
-def loss(x,config,params,data,var,model_var=0.0,prior=None,constraint_targets=None,scenario='ssp245'):
-    solar_forcing, volcanic_forcing, emissions = load_data(scenario,1,1750,2101)
-    var = var + model_var
-    fair = runFaIR(solar_forcing,volcanic_forcing,emissions,config,scenario,
-                   start=1750,end=2101)
-    config[params] = x
-    # Temperature anomaly compared to temperature mean between year 1850 and 1900
-    anomaly = fair.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0).to_numpy().squeeze() \
-            - fair.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
-    S = 0.0
-    S += compute_data_loss(anomaly, data, var)
-    if prior is not None:
-        S += compute_prior_loss(prior, x)
-    if constraint_targets is not None:
-        constraints = compute_constraints(fair)
-        S += compute_constrained_loss(constraints,constraint_targets)
-    return S

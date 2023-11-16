@@ -7,9 +7,13 @@ Created on Wed Feb 22 2023
 """
 
 import numpy as np
+import numpy.random as npr
 from scipy.linalg import expm, eigh
 import time
-from fair_tools import load_data,runFaIR,read_temperature_data,constraint_targets,load_configs,compute_data_loss,compute_prior_loss,compute_constrained_loss,compute_constraints
+# Data related functions from fair_tools
+from fair_tools import load_data,read_temperature_data,get_param_names
+# Sampling and computation related functions from fair_tools
+from fair_tools import runFaIR,compute_data_loss,compute_prior_loss,compute_constrained_loss,compute_constraints,constraint_targets
 from fair.energy_balance_model import EnergyBalanceModel
 from netCDF4 import Dataset
 import os
@@ -42,7 +46,14 @@ def validate_config(config,bounds=None):
     h_mat[4:, 4:] = eb_matrix.T
     g_mat = expm(h_mat)
     q_mat_d = g_mat[4:, 4:].T @ g_mat[:4, 4:]
-    positive_definite = np.all(eigh(q_mat_d,eigvals_only=True) > 0)
+    
+    try:
+        # Check if the matrix is positive definite by verifying the positivity of all eigenvalues
+        positive_definite = np.all(eigh(q_mat_d,eigvals_only=True) > 0)
+    except ValueError:
+        # If matrix has infs or nans, it is not positive definite and the config is not valid
+        positive_definite = False
+        
     # Bounds
     if bounds is not None:
         in_bounds = all((min(bounds[param]) <= config[param].iloc[0]) & (config[param].iloc[0] <= max(bounds[param])) for param in bounds.keys())
@@ -85,7 +96,7 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
     data_loss_chain = np.full(warmup+samples,np.nan)
     prior_loss_chain = np.full(warmup+samples,np.nan)
     seed_chain = np.full(warmup+samples,np.nan)
-    seed_chain[0] = int(init_config['seed'])
+    seed_chain[0] = init_config['seed'].iloc[0]
     constraints_chain = np.full((warmup+samples,9),np.nan)
     constraint_loss_chain = np.full((warmup+samples),np.nan)
     loss_chain = np.full(warmup+samples,np.nan)
@@ -106,14 +117,14 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
     # Create netcdf file for the results
     create_file(scenario,names,warmup,C0,filename=filename)
     
-    start_time = time.process_time()
+    start_time = time.perf_counter()
     t_start, t_end = 1, warmup+samples-1
     for t in range(t_start,t_end+1):
         if t == 1: print('Warmup period...')
         #proposal value for the chain
-        proposal = np.random.multivariate_normal(x,Ct)
+        proposal = npr.multivariate_normal(x,Ct)
         proposal_config[names] = proposal
-        seed = np.random.randint(0,1e10+1)
+        seed = npr.randint(0,int(6e8))
         proposal_config['seed'] = seed 
         valid = validate_config(proposal_config,bounds=bounds)
         if not valid:
@@ -132,9 +143,7 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
                 loss_proposal += constraint_loss_proposal
             log_acceptance = -loss_proposal + loss
         # Accept or reject
-        #print(f'Acceptance: {min(100,100*np.exp(log_acceptance))} %, loss = {loss}')
-        #print(log_acceptance)
-        if np.log(np.random.uniform(0,1)) <= log_acceptance:
+        if np.log(npr.uniform(0,1)) <= log_acceptance:
             x = proposal
             data_loss = data_loss_proposal
             prior_loss = prior_loss_proposal
@@ -180,10 +189,10 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
                           constraints_arr = constraints_chain[:(t+1),:],filename=filename)
             progress += 10
     print('...done')
-    end_time = time.process_time()
-    print(f"AM performance:\nposterior samples = {samples}\ntime: {end_time-start_time} s\nacceptance ratio = {100*accepted/samples:.2f} %")
+    end_time = time.perf_counter()
+    print(f"AM performance:\nposterior samples = {samples}\ntime: {(end_time-start_time):.1f} s\nacceptance ratio = {100*accepted/samples:.2f} %")
     
-def mcmc_extend(scenario, samples, prior=None, bounds=None, use_constraints=True, model_var=None,
+def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constraints=True,model_var=None,
                 folder='MC_results', filename='sampling'):
     '''
     Extends the existing chains with provided number of samples.
@@ -215,11 +224,9 @@ def mcmc_extend(scenario, samples, prior=None, bounds=None, use_constraints=True
     
     x = chain[-1,:]
     constraints = constraints_chain[-1,:]
-    prior_configs = load_configs()
-    config = prior_configs.median(axis=0).to_frame().transpose()
+    config = init_config.copy()
+    config[params] = x
     config['seed'] = seed_chain[-1]
-    config[params] = x 
-    #config = pd.DataFrame(data=x.tolist()+[seed_chain[-1]],index=params+['seed']).transpose()
     loss = loss_chain[-1]
     prior_loss = prior_loss_chain[-1]
     data_loss = data_loss_chain[-1]
@@ -250,9 +257,9 @@ def mcmc_extend(scenario, samples, prior=None, bounds=None, use_constraints=True
     print('Sampling posterior...')
     for t in range(t_start,t_end+1):
         #proposal value for the chain
-        proposal = np.random.multivariate_normal(x,Ct)
+        proposal = npr.multivariate_normal(x,Ct)
         proposal_config[params] = proposal
-        seed = np.random.randint(0,1e10+1)
+        seed = npr.randint(0,int(6e8))
         proposal_config['seed'] = seed
         valid = validate_config(proposal_config,bounds=bounds)
         prior_value = prior(proposal)
@@ -272,7 +279,7 @@ def mcmc_extend(scenario, samples, prior=None, bounds=None, use_constraints=True
                 loss_proposal += constraint_loss_proposal
             log_acceptance = -loss_proposal + loss
         #Accept or reject
-        if np.log(np.random.uniform(0,1)) <= log_acceptance:
+        if np.log(npr.uniform(0,1)) <= log_acceptance:
             x = proposal
             if loss_proposal < loss_MAP:
                 MAP = x
@@ -329,8 +336,11 @@ def create_file(scenario,params,warmup,C0,filename='sampling'):
     ncfile.createVariable('loss_chain',float,('sample',),fill_value=False)
     ncfile.createVariable('seeds',int,('sample',),fill_value=False)
     ncfile.createVariable('MAP',float,('param',),fill_value=False)
-    ncfile.createVariable('cov',float,('param','param'),fill_value=False)
+    #ncfile.createVariable('prior_cov',float,('param','param'),fill_value=False)
+    #ncfile.createVariable('obs_cov',float,('param','param'),fill_value=False)
+    ncfile.createVariable('pos_cov',float,('param','param'),fill_value=False)
     ncfile.createVariable('Ct',float,('param','param'),fill_value=False)
+    
     ncfile['Ct'][:,:] = C0
     ncfile.createVariable('warmup',int,fill_value=False)
     ncfile['warmup'][:] = warmup
