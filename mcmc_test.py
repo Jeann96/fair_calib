@@ -9,12 +9,12 @@ Created on Tue Feb 7 14:39:15 2023
 
 import numpy as np
 import os
-
 import sys
+'''
 fair_path = 'FAIR/src/'
 if fair_path not in sys.path:
     sys.path.append(fair_path)
-
+'''
 cwd = os.getcwd()
 from fair_tools import load_data, load_calib_samples, load_prior_samples, load_MC_samples, runFaIR, get_prior, read_temperature_data, get_param_ranges
 from plotting_tools import plot_distributions, plot_temperature, plot_constraints
@@ -32,7 +32,7 @@ filename = 'very_long_sampling'
 # Choose FaIR scenario (do not change)
 scenario = 'ssp245'
 # Length of the warmup (burn-in) period
-warmup = 10000
+warmup = 1000
 # Number of samples collected after the warmup
 samples = 10000
 
@@ -40,10 +40,12 @@ samples = 10000
 new_chain = True
 # If true, extends the existing chain equal to the number of {samples}
 extend = False
+# Covariance for the proposal distribution used for extending the chain
+Ct = np.loadtxt('Ct')
 # Include constraints for the sampling
 use_constraints = True
 # Plot figures
-plot = False
+plot = True
 
 ### MAIN PROGRAM STARTS HERE
 # Read prior and calibration configurations
@@ -68,12 +70,12 @@ prior_fun = get_prior(included)
 fair_calib = runFaIR(solar_forcing,volcanic_forcing,emissions,calib_configs,scenario,
                      start=1750,end=2100)
 
-model_var = 0.4**2
+model_var = 0.35**2
 init_config = prior_configs.median(axis=0).to_frame().transpose()
 seed = np.random.randint(*param_ranges['seed'])
 init_config['seed'] = seed
-#C0 = np.diag(prior_configs[included].std(axis=0).to_numpy()**2)
-C0 = np.diag((0.1 * init_config[included].to_numpy().squeeze())**2)
+C0 = np.diag(np.square(0.2*prior_configs[included].std(axis=0).to_numpy()))
+#C0 = np.diag((0.01 * init_config[included].to_numpy().squeeze())**2)
 solar_forcing, volcanic_forcing, emissions = load_data(scenario,1,1750,2100)
 fair_init = runFaIR(solar_forcing,volcanic_forcing,emissions,init_config,scenario,
                      start=1750,end=2100)
@@ -82,27 +84,30 @@ if new_chain:
              model_var=model_var,filename=filename)
 if extend:
     mcmc_extend(scenario,init_config,samples,prior=prior_fun,use_constraints=use_constraints, 
-                model_var=model_var, filename=filename)
+                model_var=model_var,Ct=Ct,filename=filename)
 
 if plot:
     ds = Dataset(f'{result_folder}/{scenario}/{filename}.nc',mode='r')
     prior_loss, data_loss, loss = ds['prior_loss_chain'][:].data, ds['data_loss_chain'][:].data, ds['loss_chain'][:].data
     chain, seeds = ds['chain'][:,:].data, ds['seeds'][:].data
+    
     MAP_index = warmup + np.argmin(loss[warmup:])
     MAP_config = init_config.copy()
     MAP_config[included] = chain[MAP_index,:]
     MAP_config['seed'] = seeds[MAP_index]
     
-    full_pos_configs = load_MC_samples(ds,N=1000,thinning=1,param_ranges=param_ranges)
+    full_pos_configs = load_MC_samples(ds,N=5000,thinning=1,param_ranges=param_ranges)
+    #full_pos_configs.drop('CO2 concentration 1750',axis='columns',inplace=True)
+    #full_pos_configs.rename({'co2_concentration_1750':'CO2 concentration 1750'},axis='columns',inplace=True)
 
     plot_distributions(prior_configs,calib_configs,alpha=0.6,title='Prior vs calibration',savefig=True)
     plot_distributions(prior_configs,full_pos_configs,alpha=0.6,title='Prior vs MC sampling',savefig=True)
     plot_distributions(calib_configs,full_pos_configs,alpha=0.6,title='Calib vs MC sampling',savefig=True)
     
     #Run fair with chosen number of configuration chosen from the parameter posterior
-    pos_configs = load_MC_samples(ds,N=1000,thinning=1,param_ranges=param_ranges)
-    #pos_configs[[name for name in excluded if name != 'seed']] = np.repeat(init_config[[name for name in excluded if name != 'seed']].to_numpy(),1000,axis=0)
-    
+    pos_configs = load_MC_samples(ds,N=1000,thinning=5,param_ranges=param_ranges)
+    #pos_configs.drop('CO2 concentration 1750',axis='columns',inplace=True)
+    #pos_configs.rename({'co2_concentration_1750':'CO2 concentration 1750'},axis='columns',inplace=True)
     solar_forcing, volcanic_forcing, emissions = load_data(scenario,len(pos_configs),1750,2100)
     fair_posterior = runFaIR(solar_forcing,volcanic_forcing,emissions,pos_configs,scenario,
                              start=1750,end=2100)
@@ -111,8 +116,7 @@ if plot:
     fair_MAP = runFaIR(solar_forcing,volcanic_forcing,emissions,MAP_config,scenario,
                        start=1750,end=2100)
     plot_temperature(scenario, 1750, 2100, fair_calib, fair_posterior, fair_MAP, T_data, T_std)
-    
-    plot_constraints(ds,N=1000,thinning=1)
-    
-    del sys.path[-1]
+    plot_constraints(ds,N=1000,thinning=5)
+    # Close dataset
     ds.close()
+    #del sys.path[-1]

@@ -11,7 +11,7 @@ import numpy.random as npr
 from scipy.linalg import expm, eigh
 import time
 # Data related functions from fair_tools
-from fair_tools import load_data,read_temperature_data,get_param_names
+from fair_tools import load_data,read_temperature_data
 # Sampling and computation related functions from fair_tools
 from fair_tools import runFaIR,compute_data_loss,compute_prior_loss,compute_constrained_loss,compute_constraints,constraint_targets
 from fair.energy_balance_model import EnergyBalanceModel
@@ -85,7 +85,7 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
     # Dimension related scaling for adaptive Metropolis
     sd = 2.4**2 / xdim
     if C0 is None:
-        C0 = np.diag((0.1*x)**2)
+        C0 = np.diag((0.1*np.abs(x))**2)
     Ct = C0
     # MAP (maximum posterior) estimate, equal to minimum of the loss function
     MAP = x
@@ -107,12 +107,12 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
     prior_loss = compute_prior_loss(prior, x)
     prior_loss_chain[0] = prior_loss
     loss = data_loss + prior_loss
-    loss_chain[0] = loss
     constraints = compute_constraints(fair)
     constraints_chain[0,:] = constraints
     if use_constraints:
         constraint_loss = compute_constrained_loss(constraints,targets)
         loss += constraint_loss
+    loss_chain[0] = loss
         
     # Create netcdf file for the results
     create_file(scenario,names,warmup,C0,filename=filename)
@@ -120,7 +120,8 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
     start_time = time.perf_counter()
     t_start, t_end = 1, warmup+samples-1
     for t in range(t_start,t_end+1):
-        if t == 1: print('Warmup period...')
+        if t == 1: 
+            print('Warmup period...')
         #proposal value for the chain
         proposal = npr.multivariate_normal(x,Ct)
         proposal_config[names] = proposal
@@ -142,6 +143,7 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
                 constraint_loss_proposal = compute_constrained_loss(proposal_constraints,targets)
                 loss_proposal += constraint_loss_proposal
             log_acceptance = -loss_proposal + loss
+            
         # Accept or reject
         if np.log(npr.uniform(0,1)) <= log_acceptance:
             x = proposal
@@ -169,8 +171,12 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
             print(f'Acceptance ratio = {100*accepted/warmup:.2f} %')
             accepted = 0
             print('Sampling posterior...')
-            Ct = sd * np.cov(chain[:warmup,:], rowvar=False)
-            mean = chain[:warmup,:].mean(axis=0).reshape((xdim,1))
+            Ct = sd * np.cov(chain[(warmup//2):warmup,:], rowvar=False)
+            mean = chain[(warmup//2):warmup,:].mean(axis=0).reshape((xdim,1))
+            #low, high = np.percentile(loss_chain[:warmup],[2.5,97.5])
+            #inside_bounds = (low < loss_chain[:warmup]) & (loss_chain[:warmup] < high)
+            #Ct = np.cov(chain[:warmup,:][np.where(inside_bounds)[0],:],rowvar=False)
+            #mean = np.mean(chain[:warmup,:][np.where(inside_bounds)[0],:],axis=0).reshape((xdim,1))
         elif t >= warmup:
             # Value in chain as column vector
             vec = chain[t,:].reshape((xdim,1))
@@ -192,8 +198,8 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
     end_time = time.perf_counter()
     print(f"AM performance:\nposterior samples = {samples}\ntime: {(end_time-start_time):.1f} s\nacceptance ratio = {100*accepted/samples:.2f} %")
     
-def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constraints=True,model_var=None,
-                folder='MC_results', filename='sampling'):
+def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constraints=True,
+                model_var=None,Ct=None,folder='MC_results',filename='sampling'):
     '''
     Extends the existing chains with provided number of samples.
     '''
@@ -210,13 +216,14 @@ def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constrai
     sd = 2.4**2 / xdim
     chain, loss_chain = ds['chain'][:,:].data, ds['loss_chain'][:].data
     mean = chain.mean(axis=0).reshape((xdim,1))
-    constraints_chain = np.column_stack(tuple(ds[constraint][:] for constraint in 
-                                              ['ecs','tcr','T 1995-2014','ari','aci','aer', 'CO2', 'ohc', 'T 2081-2100']))
+    constraint_names = ['ecs','tcr','T 1995-2014','ari','aci','aer', 'CO2', 'ohc', 'T 2081-2100']
+    constraints_chain = np.column_stack(tuple(ds[constraint][:] for constraint in constraint_names))
     data_loss_chain = ds['data_loss_chain'][:].data
     prior_loss_chain = ds['prior_loss_chain'][:].data
     constraint_loss_chain = ds['constraint_loss_chain'][:].data
     MAP = ds['MAP'][:].data
-    Ct = ds['Ct'][:,:].data
+    if Ct is None:
+        Ct = ds['Ct'][:,:].data
     warmup = int(ds['warmup'][:].data)
     seed_chain = ds['seeds'][:].data
     t_start, t_end = ds.dimensions['sample'].size, ds.dimensions['sample'].size + samples - 1
@@ -340,7 +347,6 @@ def create_file(scenario,params,warmup,C0,filename='sampling'):
     #ncfile.createVariable('obs_cov',float,('param','param'),fill_value=False)
     ncfile.createVariable('pos_cov',float,('param','param'),fill_value=False)
     ncfile.createVariable('Ct',float,('param','param'),fill_value=False)
-    
     ncfile['Ct'][:,:] = C0
     ncfile.createVariable('warmup',int,fill_value=False)
     ncfile['warmup'][:] = warmup
