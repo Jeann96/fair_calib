@@ -83,8 +83,9 @@ def detrend_dataarray(data_array, dim, order=4, return_trend=False):
 number_of_realizations=data['HadCrut5'].shape[0]
 std_hadcrut5=np.zeros(number_of_realizations)
 detrended_hadcrut=xr.zeros_like(data['HadCrut5'])
+trend_hadcrut=xr.zeros_like(data['HadCrut5'])
 for i in range(1,number_of_realizations+1):
-    detrended_hadcrut.loc[dict(realization=i)]=detrend_dataarray(data['HadCrut5'].loc[dict(realization=i)],'year')
+    trend_hadcrut.loc[dict(realization=i)], detrended_hadcrut.loc[dict(realization=i)]=detrend_dataarray(data['HadCrut5'].loc[dict(realization=i)],'year', return_trend=True)
     std_hadcrut5[i-1]=float(detrended_hadcrut.loc[dict(realization=i)].std())
     
 
@@ -95,14 +96,28 @@ solar_forcing, volcanic_forcing, emissions = load_data(scenario,len(calib_config
 fair_calib = runFaIR(solar_forcing,volcanic_forcing,emissions,calib_configs,scenario,
                      start=1750,end=2100)
 
+#Make another ensemble without stochasticity
+fair_calib_det = runFaIR(solar_forcing,volcanic_forcing,emissions,calib_configs,scenario,
+                     start=1750,end=2100, stochastic_run=False)
+
 
 #Calculate natural variability for FaIR runs
 number_of_fair_runs=fair_calib.temperature.shape[2]
 std_fair=np.zeros(number_of_fair_runs)
 detrended_fair=xr.zeros_like(fair_calib.temperature.loc[dict(layer=0)])
+trend_fair=xr.zeros_like(fair_calib.temperature.loc[dict(layer=0)])
+
+std_fair_det=np.zeros(number_of_fair_runs)
+detrended_fair_det=xr.zeros_like(fair_calib.temperature.loc[dict(layer=0)])
+trend_fair_det=xr.zeros_like(fair_calib.temperature.loc[dict(layer=0)])
+
+
 for i, config in enumerate(calib_configs.index):
-    detrended_fair.loc[dict(config=config)]=detrend_dataarray(fair_calib.temperature.loc[dict(layer=0, config=config) ],'timebounds')
+    trend_fair.loc[dict(config=config)], detrended_fair.loc[dict(config=config)]=detrend_dataarray(fair_calib.temperature.loc[dict(layer=0, config=config) ],'timebounds', return_trend=True)
     std_fair[i]=float((detrended_fair.loc[dict(config=config)].std()))
+    
+    trend_fair_det.loc[dict(config=config)], detrended_fair_det.loc[dict(config=config)]=detrend_dataarray(fair_calib_det.temperature.loc[dict(layer=0, config=config) ],'timebounds', return_trend=True)
+    std_fair_det[i]=float((detrended_fair_det.loc[dict(config=config)].std()))
 
 # Calculate correlation coefficients for all parameters
 corrcoeff=pd.Series(index=calib_configs.columns, dtype='float64')
@@ -114,11 +129,33 @@ for i, param in enumerate(corrcoeff.index):
         corrcoeff_above_threshold[param]=corrcoeff[param]
         print(param+' = ' + str(round(corrcoeff[param],3)))
 
+# Plot examples of detrending 
+colors = ['tab:blue', 'tab:green', 'tab:red', 'tab:brown'] 
+fig0, ax0=pl.subplots(2,2, figsize=(15,10))
+for i, color in zip([1], colors):
+    data['HadCrut5'].loc[dict(realization=i)].plot(ax=ax0[0,0], color=color)
+    trend_hadcrut.loc[dict(realization=i)].plot(ax=ax0[0,0])
+    detrended_hadcrut.loc[dict(realization=i)].plot(ax=ax0[1,0])
+    
+    config=fair_calib.configs[i]
+    fair_calib.temperature.loc[dict(layer=0, config=config)].plot(ax=ax0[0,1], color=color )
+    trend_fair.loc[dict(config=config)].plot(ax=ax0[0,1], color=color)
+    detrended_fair.loc[dict(config=config)].plot(ax=ax0[1,1], color=color)
+    
+    fair_calib_det.temperature.loc[dict(layer=0, config=config)].plot(ax=ax0[0,1], color=color )
+    trend_fair_det.loc[dict(config=config)].plot(ax=ax0[0,1], color=color)
+    detrended_fair_det.loc[dict(config=config)].plot(ax=ax0[1,1], color=color)
+    
+    ax0[0,0].set_title('Hadcrut5')
+    
+    
+    
 
 # Plot histograms of internal variability in HadCrut5 and FaiR runs
 fig1, ax1=pl.subplots(1,1)
 ax1.hist(std_hadcrut5, bins=20, alpha=0.5, density=True, label='HadCrut5') 
-ax1.hist(std_fair, bins=20, alpha=0.5, density=True, label='FaIR Calibration')
+ax1.hist(std_fair, bins=20, alpha=0.5, density=True, label='FaIR Calibration - stochastic')
+ax1.hist(std_fair_det, bins=20, alpha=0.5, density=True, label='FaIR Calibration - deterministic')
 ax1.legend()
 ax1.set_xlabel('Internal variability (std)')
 fig1.savefig(f'{figdir}/internal_variability_histograms.png', dpi=150)
@@ -198,3 +235,5 @@ fair_calib.temperature.loc[dict(layer=0,timebounds=2100)].plot.hist(bins=25,weig
 ax5[1].set_title('Temperature at 2100')
 ax5[1].legend()
 fig5.savefig(f'{figdir}/temperature_distribution_2020_and_2100.png', dpi=150)
+
+fig6, ax6=pl.subplots(1,1)

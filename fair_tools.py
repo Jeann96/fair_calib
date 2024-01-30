@@ -514,7 +514,7 @@ def load_MC_samples(ds,N=None,tail=True,thinning=1,param_ranges=None):
     return configs
 
 def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
-            start=1750, end=2020):
+            start=1750, end=2020, stochastic_run=True):
     '''
     Parameters
     ----------
@@ -577,7 +577,7 @@ def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
     fill(f.climate_configs["sigma_eta"], df_configs["sigma_eta"].values.squeeze())
     fill(f.climate_configs["sigma_xi"], df_configs["sigma_xi"].values.squeeze())
     fill(f.climate_configs["seed"], df_configs["seed"])
-    fill(f.climate_configs["stochastic_run"], True)
+    fill(f.climate_configs["stochastic_run"], stochastic_run)
     fill(f.climate_configs["use_seed"], True)
     fill(f.climate_configs["forcing_4co2"], df_configs["F_4xCO2"])
     
