@@ -131,24 +131,29 @@ for i, param in enumerate(corrcoeff.index):
 
 # Plot examples of detrending 
 colors = ['tab:blue', 'tab:green', 'tab:red', 'tab:brown'] 
-fig0, ax0=pl.subplots(2,2, figsize=(15,10))
-for i, color in zip([1], colors):
+fig0, ax0=pl.subplots(2,2, figsize=(15,10), sharex=True)
+for i, color in zip([15], colors):
     data['HadCrut5'].loc[dict(realization=i)].plot(ax=ax0[0,0], color=color)
     trend_hadcrut.loc[dict(realization=i)].plot(ax=ax0[0,0])
     detrended_hadcrut.loc[dict(realization=i)].plot(ax=ax0[1,0])
     
     config=fair_calib.configs[i]
     fair_calib.temperature.loc[dict(layer=0, config=config)].plot(ax=ax0[0,1], color=color )
-    trend_fair.loc[dict(config=config)].plot(ax=ax0[0,1], color=color)
+    # trend_fair.loc[dict(config=config)].plot(ax=ax0[0,1], color=color)
     detrended_fair.loc[dict(config=config)].plot(ax=ax0[1,1], color=color)
     
-    fair_calib_det.temperature.loc[dict(layer=0, config=config)].plot(ax=ax0[0,1], color=color )
-    trend_fair_det.loc[dict(config=config)].plot(ax=ax0[0,1], color=color)
-    detrended_fair_det.loc[dict(config=config)].plot(ax=ax0[1,1], color=color)
+    fair_calib_det.temperature.loc[dict(layer=0, config=config)].plot(ax=ax0[0,1], color=colors[1] )
+    # trend_fair_det.loc[dict(config=config)].plot(ax=ax0[0,1], color=colors[1])
+    detrended_fair_det.loc[dict(config=config)].plot(ax=ax0[1,1], color=colors[1])
     
     ax0[0,0].set_title('Hadcrut5')
+    ax0[0,0].set_xlim(1850,2025)
+    ax0[0,1].set_ylim(-0.3,1.0)
+    ax0[0,0].set_ylim(-0.3,1.0)
+    ax0[1,1].set_ylim(-0.4,0.6)
+    ax0[1,0].set_ylim(-0.4,0.6)
     
-    
+fig0.savefig(f'{figdir}/detrending_examples.png', dpi=150)    
     
 
 # Plot histograms of internal variability in HadCrut5 and FaiR runs
