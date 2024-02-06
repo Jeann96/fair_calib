@@ -44,7 +44,7 @@ fair_v = out["FAIR_VERSION"]
 constraint_set = out["CONSTRAINT_SET"]
 output_ensemble_size = int(out["POSTERIOR_SAMPLES"])
 
-def load_data(scenario,nconfigs,start,end):
+def read_forcing_data(scenario,nconfigs,start,end):
     '''
     Function to load input for a SSP2-4.5 run
     
@@ -98,7 +98,7 @@ def get_param_names():
     df.rename({'co2_concentration_1750': 'CO2 concentration 1750'},axis='columns',inplace=True)
     return df.columns.tolist()
 
-def load_calib_samples():
+def read_calib_samples():
     df = pd.read_csv(f"{fair_calibration_dir}/output/fair-{fair_v}/v{cal_v}/{constraint_set}/"
                      "posteriors/calibrated_constrained_parameters.csv",
                      index_col=0)
@@ -119,10 +119,10 @@ def constraint_ranges():
     return out
 
 def get_param_ranges():
-    return {'gamma': (0.0,25.0), 'c1': (2.0,7.0), 'c2':(0.0,50.0), 'c3':(0.0,250.0),
-            'kappa1': (0.5,2.5), 'kappa2': (0.0,7.0), 'kappa3': (0.0,2.0), 'epsilon': (0.0,2.5),
-            'sigma_eta': (0.0,2.5),'sigma_xi':(0.0,1.0),'F_4xCO2':(5.0,12.0),'r0':(20.0,45.0),
-            'rU': (-0.01,0.02),'rT': (-2.5,7.5),'rA':(-0.005,0.008),'ari BC':(0.0,0.042),
+    return {'gamma': (0.3,30.0), 'c1': (1.0,8.0), 'c2':(0.5,50.0), 'c3':(2.5,250.0),
+            'kappa1': (0.3,3.0), 'kappa2': (0.05,7.2), 'kappa3': (0.02,2.0), 'epsilon': (0.02,2.6),
+            'sigma_eta': (0.01,2.6),'sigma_xi':(0.01,1.0),'F_4xCO2':(5.0,11.5),'r0':(20.0,50.0),
+            'rU': (-0.01,0.02),'rT': (-2.7,7.5),'rA':(-0.005,0.008),'ari BC':(0.0,0.042),
             'ari CH4': (-4.54e-6,0.0),'ari N2O': (-7.27e-5,0.0), 'ari NH3': (-0.00113,0.0),
             'ari NOx': (-0.000135,0.0),'ari OC': (-0.00792,0.0), 'ari Sulfur': (-0.005725,0.0),
             'ari VOC': (-3.2e-5,0.0),'ari Equivalent effective stratospheric chlorine': (-1.5072e-5,0.0),
@@ -133,7 +133,7 @@ def get_param_ranges():
             'scale N2O': (0.7,1.3), 'scale minorGHG': (0.6,1.4), 'scale Stratospheric water vapour': (-0.5,2.5),
             'scale Contrails': (-0.2,2.2),'scale Light absorbing particles on snow and ice': (-0.6,2.6),
             'scale Land use': (0.0,2.0),'scale Volcanic': (0.5,1.5), 'solar_amplitude': (0.0,2.0), 
-            'solar_trend': (-0.11,0.11),'scale CO2': (0.75,1.25), 'CO2 concentration 1750': (272,283), 
+            'solar_trend': (-0.12,0.12),'scale CO2': (0.75,1.25), 'CO2 concentration 1750': (270,286), 
             'seed': (0,int(6e8))}
     
 def constraint_priors():
@@ -171,7 +171,18 @@ def constraint_targets():
     out['T 2081-2100'] = lambda x: skewnorm.pdf(x,2.20496701,loc=1.4124379,scale=0.60080822)
     return out
 
-def load_prior_samples():
+def get_log_constraint_target():
+    return lambda x: skewnorm.logpdf(x[0],8.82185594,loc=1.95059779,scale=1.55584604) + \
+                     norm.logpdf(x[1],loc=1.8, scale=0.6/norm.ppf(0.95)) +\
+                     skewnorm.logpdf(x[2],-1.65506091,loc=0.92708099,scale=0.12096636) +\
+                     norm.logpdf(x[3],loc=-0.3,scale=0.3/norm.ppf(0.95)) +\
+                     norm.logpdf(x[4],loc=-1.0,scale=0.7/norm.ppf(0.95)) +\
+                     norm.logpdf(x[5],loc=-1.3,scale=np.sqrt(0.7**2+0.3**2)/norm.ppf(0.95)) +\
+                     norm.logpdf(x[6],loc=397.5469792683919,scale=0.36) +\
+                     norm.logpdf(x[7],loc=396/0.91,scale=67/0.91) +\
+                     skewnorm.logpdf(x[8],2.20496701,loc=1.4124379,scale=0.60080822)
+
+def read_prior_samples():
     # Read and rename dataframes
     df_cr = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/climate_response_ebm3.csv")
     df_cc = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/carbon_cycle.csv")
@@ -191,12 +202,12 @@ def load_prior_samples():
     df = pd.concat((df_cr,df_cc,df_ari,df_aci,df_o3,df_scaling,df_co2),axis='columns')
     return df
     
-def get_prior(included):
+def get_log_prior(included):
     param_ranges = get_param_ranges()
     # Kernel density estimation for climate response parameters
     df_cr = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/climate_response_ebm3.csv")
     for param in df_cr.columns:
-        if param  not in included:
+        if param not in included:
             df_cr.drop(labels=param,axis='columns',inplace=True)
     cr_d = gaussian_kde(df_cr.T) if len(df_cr.columns) != 0 else lambda x: 1
     
@@ -216,9 +227,9 @@ def get_prior(included):
             df_ari.drop(labels=param,axis='columns',inplace=True)
     if len(df_ari.columns) != 0:
         bounds = np.array([param_ranges[param] for param in df_ari.columns])
-        ari_d = lambda x: np.prod(uniform.pdf(x,loc=bounds[:,0],scale=bounds[:,1]-bounds[:,0]))
+        ari_log_d = lambda x: np.sum(uniform.logpdf(x,loc=bounds[:,0].reshape((-1,1)),scale=(bounds[:,1]-bounds[:,0]).reshape(-1,1)))
     else:
-        ari_d = lambda x: 1
+        ari_log_d = lambda x: 0.0
     
     # Aerosol-cloud interaction parameters
     df_aci = pd.read_csv(f"{cwd}/fair-calibrate/output/fair-{fair_v}/v{cal_v}/{constraint_set}/priors/aerosol_cloud.csv")
@@ -256,28 +267,26 @@ def get_prior(included):
     if sum(N_params) != len(included):
         raise ValueError(f'Number of parameters {sum(N_params)} in the prior mismatch the number {len(included)} of included parameters')
     
-    prior = lambda x: float(cr_d(x[0:sum(N_params[:1])]) * cc_d(x[sum(N_params[:1]):sum(N_params[:2])]) * ari_d(x[sum(N_params[:2]):sum(N_params[:3])]) * \
-                            aci_d(x[sum(N_params[:3]):sum(N_params[:4])]) * o3_d(x[sum(N_params[:4]):sum(N_params[:5])]) * \
-                            scaling_d(x[sum(N_params[:5]):sum(N_params[:6])]) * co2conc_d(x[sum(N_params[:6]):sum(N_params[:7])]))
-    return prior
+    return lambda x: np.log(cr_d(x[:,0:sum(N_params[:1])].T)) + np.log(cc_d(x[:,sum(N_params[:1]):sum(N_params[:2])].T)) + ari_log_d(x[:,sum(N_params[:2]):sum(N_params[:3])].T) \
+                   + np.log(aci_d(x[:,sum(N_params[:3]):sum(N_params[:4])].T)) + np.log(o3_d(x[:,sum(N_params[:4]):sum(N_params[:5])].T)) \
+                   + np.log(scaling_d(x[:,sum(N_params[:5]):sum(N_params[:6])].T)) + np.log(co2conc_d(x[:,sum(N_params[:6]):sum(N_params[:7])].T))
 
-def read_temperature_data():
-    # Years
-    #years = list(range(1850,2021))
-    # Temperature data
+def read_gmst_temperature():
     ar6_file = "AR6_GMST.csv"
     ar6_path = f"{fair_calibration_dir}/data/forcing/{ar6_file}"
-    df = pd.read_csv(ar6_path, index_col=0).to_xarray()
-    T_mean = df['gmst']
-    # Std from HadCrut5 dataset
+    return pd.read_csv(ar6_path, index_col=0)['gmst'].to_xarray()
+
+def read_hadcrut_temperature():
     hadcrut5_file = "HadCRUT.5.0.1.0.analysis.ensemble_series.global.monthly.nc"
     hadcrut5_path = f"{cwd}/leach-et-al-2021/data/input-data/Temperature-observations/{hadcrut5_file}"
     ds = xr.open_dataset(hadcrut5_path)
-    T_data = ds['tas'].groupby('time.year').mean('time')
-    # Change reference temperature to mean of 1851-1900
-    #T_data = T_data - T_data.loc[dict(year=slice(1850,1900))].mean(dim='year')
-    T_std = T_data.std(dim='realization')
-    return T_mean, T_std
+    T = ds['tas']
+    ds.close()
+    # Yearly mean values
+    T = T.groupby('time.year').mean('time')
+    # Change reference temperature to the mean of 1850-1900
+    T = T - T.sel(year=slice(1851,1901)).mean(dim='year')
+    return T
 
 def resample_constraint_posteriors(N=10**5):
     NINETY_TO_ONESIGMA = norm.ppf(0.95)
@@ -485,7 +494,7 @@ def resample_constraint_posteriors(N=10**5):
     drawn_samples.reset_index(inplace=True)
     return drawn_samples
     
-def load_MC_samples(ds,N=None,tail=True,thinning=1,param_ranges=None):
+def read_MC_samples(ds,param_ranges,param_means,param_stds,N=None,tail=True,thinning=1):
     #samples = ds['sample'].size
     names = ds['param'][:]
     warmup = ds['warmup'][:]
@@ -508,9 +517,14 @@ def load_MC_samples(ds,N=None,tail=True,thinning=1,param_ranges=None):
         configs[names] = chain[:required_samples,:][::thinning]
         configs['seed'] = seeds[:required_samples][::thinning]
     for param in excluded:
-        if param == 'seed':
-            continue
-        configs[param] = npr.uniform(min(param_ranges[param]),max(param_ranges[param]),size=N)
+        if param == 'seed' or param.startswith('ari'):
+            configs[param] = npr.uniform(min(param_ranges[param]),max(param_ranges[param]),size=N)
+        elif param in ['gamma','sigma_eta','sigma_xi']:
+            shape = param_means[param]**2 / param_stds[param]**2
+            scale = param_stds[param]**2 / param_means[param]
+            configs[param] = npr.gamma(shape,scale,size=N)
+        else:
+            raise ValueError(f'Distribution for the excluded parameter {param} missing')
     return configs
 
 def runFaIR(solar_forcing, volcanic_forcing, emissions, df_configs, scenario,
@@ -842,45 +856,75 @@ def run_1pctco2(df_configs):
 
     return tcre,tcr
 
-def compute_data_loss(model,data,var):
-    wss = np.sum(np.square(model-data)/var)
-    loss = 0.5 * (wss + np.sum(np.log(2*np.pi*var)))
+'''
+def compute_data_loss(model,mean,var,method='wss'):
+    # Weighted square-sum
+    if method == 'wss':
+        wss = np.sum(np.square(model-mean)/var)
+        loss = 0.5 * (wss + np.sum(np.log(2*np.pi*var)))
+    elif method == 'trend':
+        x = np.arange(1900,2021,1)
+        y = model[50:]
+        trend = linregress(x,y).slope
+        loss = 0.5 * (np.square(trend-mean)/var + np.log(2*np.pi*var))
+    else:
+        raise ValueError(f'Unknown data loss method {method}')
+    return loss
+'''
+
+def compute_data_loss(model,mean,var,method='wss'):
+    # Weighted square-sum
+    if method == 'wss':
+        wss = ((model-mean)**2/var).sum(dim='timebounds')
+        loss = 0.5 * (wss + (np.log(2*np.pi*var)).sum(dim='timebounds')).data
+    elif method == 'trend':
+        x = np.arange(1900,2021,1)
+        y = model.sel(timebounds=slice(1900,2020)).data
+        params = np.polyfit(x,y,1)
+        loss = 0.5 * (np.square(params[0]-mean)/var + np.log(2*np.pi*var))
+    else:
+        raise ValueError(f'Unknown data loss method {method}')
     return loss
 
-def compute_constrained_loss(constraints,targets,weights=None):
-    names = ['ecs','tcr','T 1995-2014','ari','aci','aer', 'CO2', 'ohc', 'T 2081-2100']
-    densities = np.array([targets[constraint](constraints[i]) for i, constraint in enumerate(names)])
-    if weights is None:
-        weights = np.ones(len(names))
-    return -np.sum(np.log(densities) * weights) if np.all(densities) != 0.0 else np.inf
+def compute_constrained_loss(constraints,log_constraint_target):
+    #names = ['ecs','tcr','T 1995-2014','ari','aci','aer', 'CO2', 'ohc', 'T 2081-2100']
+    #densities = np.array([targets[constraint](constraints[i]) for i, constraint in enumerate(names)])
+    return -log_constraint_target(constraints)
 
-def compute_prior_loss(prior_fun,x):
-    prior_density_value = prior_fun(x)
-    return -np.log(prior_density_value) if prior_density_value != 0.0 else np.inf
+def compute_prior_loss(log_prior,x):
+    return -log_prior(x)
 
 def compute_constraints(fair):
-    out = np.full(9,np.nan)
+    nconfigs = fair.temperature.sizes['config']
+    out = np.full((9,nconfigs),np.nan)
     # Equilibrium climate sensitivity
-    out[0] = float(fair.ebms.ecs.to_numpy())
+    out[0] = fair.ebms.ecs.to_numpy()
     # Transient climate response
-    out[1] = float(fair.ebms.tcr.to_numpy())
+    out[1] = fair.ebms.tcr.to_numpy()
     # Average temperarature between years 1995-2014 referenced with temperature between years 1850-1901   
-    out[2] = float(fair.temperature.loc[dict(timebounds=slice(1996,2015),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy() -
-                   fair.temperature.loc[dict(timebounds=slice(1851,1901),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy())
+    out[2] = (fair.temperature.sel(timebounds=slice(1996,2015),scenario='ssp245',layer=0).mean(dim='timebounds') -
+              fair.temperature.sel(timebounds=slice(1851,1901),scenario='ssp245',layer=0).mean(dim='timebounds')).to_numpy()
     # Average aerosol-radiation interactions between 2005-2014 compared to the year 1750
-    out[3] = float(fair.forcing.loc[dict(timebounds=slice(2006,2015),scenario='ssp245',specie='Aerosol-radiation interactions')].mean(dim='timebounds').to_numpy() -
-                   fair.forcing.loc[dict(timebounds=1750,scenario='ssp245',specie='Aerosol-radiation interactions')].to_numpy().squeeze())
+    out[3] = (fair.forcing.sel(timebounds=slice(2006,2015),scenario='ssp245',specie='Aerosol-radiation interactions').mean(dim='timebounds') -
+              fair.forcing.sel(timebounds=1750,scenario='ssp245',specie='Aerosol-radiation interactions')).to_numpy().squeeze()
     # Average aerosol-cloud interactions between 2005-2014
-    out[4] = float(fair.forcing.loc[dict(timebounds=slice(2006,2015),scenario='ssp245',specie='Aerosol-cloud interactions')].mean(dim='timebounds').to_numpy() - 
-                   fair.forcing.loc[dict(timebounds=1750,scenario='ssp245',specie='Aerosol-cloud interactions')].to_numpy().squeeze())
+    out[4] = (fair.forcing.sel(timebounds=slice(2006,2015),scenario='ssp245',specie='Aerosol-cloud interactions').mean(dim='timebounds') - 
+              fair.forcing.sel(timebounds=1750,scenario='ssp245',specie='Aerosol-cloud interactions')).to_numpy().squeeze()
     # Total aerosol interaction
     out[5] = out[3] + out[4]
     # CO2 concentration in year 2014
-    out[6] = float(fair.concentration.loc[dict(timebounds=2015,scenario='ssp245',specie='CO2')].to_numpy().squeeze())
+    out[6] = fair.concentration.sel(timebounds=2015,scenario='ssp245',specie='CO2').to_numpy().squeeze()
     # Ocean heat content change between a year 1971 and a year 2018
-    out[7] = float(fair.ocean_heat_content_change.loc[dict(timebounds=2019,scenario='ssp245')].to_numpy() -
-                   fair.ocean_heat_content_change.loc[dict(timebounds=1972,scenario='ssp245')].to_numpy()) / 1e21
+    out[7] = (fair.ocean_heat_content_change.sel(timebounds=2019,scenario='ssp245') -
+              fair.ocean_heat_content_change.sel(timebounds=1972,scenario='ssp245')).to_numpy() / 1e21
     # Average temperature between years 2081-2100 compared with temperature from years 1995-2014 using scenario ssp245
-    out[8] = float(fair.temperature.loc[dict(timebounds=slice(2082,2101),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy() -
-                   fair.temperature.loc[dict(timebounds=slice(1996,2015),scenario='ssp245',layer=0)].mean(dim='timebounds').to_numpy())
+    out[8] = (fair.temperature.sel(timebounds=slice(2082,2101),scenario='ssp245',layer=0).mean(dim='timebounds') -
+                   fair.temperature.sel(timebounds=slice(1996,2015),scenario='ssp245',layer=0).mean(dim='timebounds')).to_numpy()
     return out
+
+def compute_trends(start=1900,end=2020):
+    T = read_hadcrut_temperature()
+    x = np.arange(start,end+1,1)
+    y = T.sel(year=slice(start,end)).data.T
+    params = np.polyfit(x,y,1)
+    return params[0]

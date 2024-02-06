@@ -10,16 +10,16 @@ import numpy as np
 import numpy.random as npr
 from scipy.linalg import expm, eigh
 import time
-# Data related functions from fair_tools
-from fair_tools import load_data,read_temperature_data
+# Functions realted to the observations from fair_tools
+from fair_tools import read_forcing_data,read_gmst_temperature,read_hadcrut_temperature,compute_trends
 # Sampling and computation related functions from fair_tools
-from fair_tools import runFaIR,compute_data_loss,compute_prior_loss,compute_constrained_loss,compute_constraints,constraint_targets
+from fair_tools import runFaIR,compute_data_loss,compute_constraints,get_log_prior,get_log_constraint_target
 from fair.energy_balance_model import EnergyBalanceModel
 from netCDF4 import Dataset
 import os
 cwd = os.getcwd()
 
-def validate_config(config,bounds=None):
+def validate_config(config,bounds=None,stochastic_run=False):
     #These parameters require postivity and other constraints
     climate_response_params = ['gamma', 'c1', 'c2', 'c3', 'kappa1', 'kappa2', 'kappa3', 
                                'epsilon', 'sigma_eta', 'sigma_xi','F_4xCO2']
@@ -35,7 +35,7 @@ def validate_config(config,bounds=None):
                              sigma_xi=config.iloc[0, 9],
                              sigma_eta=config.iloc[0, 8],
                              forcing_4co2=config.iloc[0, 10],
-                             stochastic_run=True)
+                             stochastic_run=stochastic_run)
     eb_matrix = ebm._eb_matrix()
     q_mat = np.zeros((4, 4))
     q_mat[0, 0] = ebm.sigma_eta**2
@@ -61,22 +61,24 @@ def validate_config(config,bounds=None):
         in_bounds = True
     return positive & physical & positive_definite & in_bounds
     
-def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds=None,use_constraints=True,model_var=None,
-             folder='MC_results',filename='sampling'):
+def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,bounds=None,use_constraints=True,use_prior=True,
+             stochastic_run=False,data_loss_method='wss',folder='MC_results',filename='sampling'):
     # Read data
-    solar_forcing, volcanic_forcing, emissions = load_data(scenario,1,1750,2101)
-    T_data, T_std = read_temperature_data()
-    targets = constraint_targets() 
-    data, var = T_data.data, T_std.data**2
-    if model_var is not None:
-        var = var + model_var
-    #ydim = len(data)
-    # Run the first fair
+    solar_forcing, volcanic_forcing, emissions = read_forcing_data(scenario,1,1750,2101)
+    gmst = read_gmst_temperature()
+    T = read_hadcrut_temperature()
+    T = T.rename({'year':'timebounds'})
+    if data_loss_method == 'wss':
+        obs, var = gmst, T.std(dim='realization')**2
+    elif data_loss_method == 'trend':
+        trends = compute_trends()
+        obs, var = np.mean(trends), np.std(trends)**2
+    # Run FaIR the first time
     fair = runFaIR(solar_forcing,volcanic_forcing,emissions,init_config,scenario,
-                   start=1750,end=2101)
+                   start=1750,end=2101,stochastic_run=stochastic_run)
     # Temperature anomaly compared to temperature mean between year 1850 and 1900
-    anomaly = fair.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0).to_numpy().squeeze() \
-            - fair.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
+    anomaly = fair.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0) -\
+              fair.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds')
     # proposal fair configuration
     proposal_config = init_config.copy()
     progress, accepted = 0, 0
@@ -93,25 +95,25 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
     # Initialize chains
     chain = np.full((warmup+samples,xdim),np.nan)
     chain[0,:] = x
-    data_loss_chain = np.full(warmup+samples,np.nan)
-    prior_loss_chain = np.full(warmup+samples,np.nan)
+    #data_loss_chain = np.full(warmup+samples,np.nan)
     seed_chain = np.full(warmup+samples,np.nan)
     seed_chain[0] = init_config['seed'].iloc[0]
     constraints_chain = np.full((warmup+samples,9),np.nan)
-    constraint_loss_chain = np.full((warmup+samples),np.nan)
     loss_chain = np.full(warmup+samples,np.nan)
     
     # Compute loss (negative log-likehood) from data, prior and constraints
-    data_loss = compute_data_loss(anomaly, data, var)
-    data_loss_chain[0] = data_loss
-    prior_loss = compute_prior_loss(prior, x)
-    prior_loss_chain[0] = prior_loss
-    loss = data_loss + prior_loss
-    constraints = compute_constraints(fair)
-    constraints_chain[0,:] = constraints
+    loss = compute_data_loss(anomaly,obs,var,method=data_loss_method)
+    #data_loss_chain[0] = loss
+    if use_prior:
+        log_prior = get_log_prior(names)
+        #prior_loss_chain = np.full(warmup+samples,np.nan)
+        prior_loss = float(-log_prior(x.reshape((1,-1))))
+        loss += prior_loss
+    constraints = compute_constraints(fair).squeeze()
     if use_constraints:
-        constraint_loss = compute_constrained_loss(constraints,targets)
-        loss += constraint_loss
+        log_constraint_target = get_log_constraint_target()
+        constraints_chain[0] = constraints
+        loss += float(-log_constraint_target(constraints))
     loss_chain[0] = loss
         
     # Create netcdf file for the results
@@ -126,44 +128,34 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
         proposal = npr.multivariate_normal(x,Ct)
         proposal_config[names] = proposal
         seed = npr.randint(0,int(6e8))
-        proposal_config['seed'] = seed 
+        proposal_config['seed'] = seed
         valid = validate_config(proposal_config,bounds=bounds)
         if not valid:
             log_acceptance = -np.inf
         else:
             fair_proposal = runFaIR(solar_forcing,volcanic_forcing,emissions,proposal_config,scenario,
-                                    start=1750,end=2101)
-            anomaly = fair_proposal.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0).to_numpy().squeeze() \
-                    - fair_proposal.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
-            data_loss_proposal = compute_data_loss(anomaly, data, var)
-            prior_loss_proposal = compute_prior_loss(prior, proposal)
-            loss_proposal = data_loss_proposal + prior_loss_proposal
-            proposal_constraints = compute_constraints(fair_proposal)
+                                    start=1750,end=2101,stochastic_run=stochastic_run)
+            anomaly = fair_proposal.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0) -\
+                      fair_proposal.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds')
+            loss_proposal = compute_data_loss(anomaly,obs,var,method=data_loss_method)
+            if use_prior:
+                loss_proposal += float(-log_prior(proposal.reshape((1,-1))))
+            proposal_constraints = compute_constraints(fair_proposal).squeeze()
             if use_constraints:
-                constraint_loss_proposal = compute_constrained_loss(proposal_constraints,targets)
-                loss_proposal += constraint_loss_proposal
+                loss_proposal += float(-log_constraint_target(proposal_constraints))
             log_acceptance = -loss_proposal + loss
-            
         # Accept or reject
         if np.log(npr.uniform(0,1)) <= log_acceptance:
             x = proposal
-            data_loss = data_loss_proposal
-            prior_loss = prior_loss_proposal
+            loss = loss_proposal
             if loss_proposal < loss and t >= warmup:
                 MAP = x
-            loss = loss_proposal
             constraints = proposal_constraints
-            if use_constraints:
-                constraint_loss = constraint_loss_proposal
             accepted += 1
         chain[t,:] = x
         seed_chain[t] = seed
-        data_loss_chain[t] = data_loss
-        prior_loss_chain[t] = prior_loss
-        constraints_chain[t,:] = constraints
-        if use_constraints:
-            constraint_loss_chain[t] = constraint_loss
         loss_chain[t] = loss
+        constraints_chain[t,:] = constraints
         
         # Adaptation starts after the warmup period
         if t == warmup - 1:
@@ -190,26 +182,27 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,prior=None,bounds
         if (t-warmup+1) / samples * 100 >= progress:
             print(f'{progress}%')
             # Save results after each 10 %
-            save_progress(scenario,warmup,Ct,chain[:(t+1),:],data_loss_chain[:(t+1)],prior_loss_chain[:(t+1)],
-                          loss_chain[:(t+1)],seed_chain[:(t+1)],MAP,
-                          constraints_arr = constraints_chain[:(t+1),:],filename=filename)
+            save_progress(scenario,warmup,Ct,chain[:(t+1),:],loss_chain[:(t+1)],seed_chain[:(t+1)],MAP,
+                          constraints_arr=constraints_chain[:(t+1),:],filename=filename)
             progress += 10
     print('...done')
     end_time = time.perf_counter()
     print(f"AM performance:\nposterior samples = {samples}\ntime: {(end_time-start_time):.1f} s\nacceptance ratio = {100*accepted/samples:.2f} %")
     
-def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constraints=True,
-                model_var=None,Ct=None,folder='MC_results',filename='sampling'):
+def mcmc_extend(scenario,init_config,samples,bounds=None,use_constraints=True,use_prior=True,
+                stochastic_run=False,Ct=None,folder='MC_results',filename='sampling',data_loss_method='wss'):
     '''
     Extends the existing chains with provided number of samples.
     '''
-    solar_forcing, volcanic_forcing, emissions = load_data(scenario,1,1750,2101)
-    data, std = read_temperature_data()
-    targets = constraint_targets() 
-    # Data variance
-    var = std.to_numpy()**2
-    if model_var is not None:
-        var = var + model_var
+    solar_forcing, volcanic_forcing, emissions = read_forcing_data(scenario,1,1750,2101)
+    gmst = read_gmst_temperature()
+    T = read_hadcrut_temperature()
+    if data_loss_method == 'wss':
+        obs, var = gmst, T.std(dim='realization')**2
+    elif data_loss_method == 'trend':
+        trends = compute_trends()
+        obs, var = np.mean(trends), np.std(trends)**2
+
     ds = Dataset(f'{cwd}/{folder}/{scenario}/{filename}.nc','r')
     params = ds['param'][:].tolist()
     xdim = ds.dimensions['param'].size
@@ -218,9 +211,6 @@ def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constrai
     mean = chain.mean(axis=0).reshape((xdim,1))
     constraint_names = ['ecs','tcr','T 1995-2014','ari','aci','aer', 'CO2', 'ohc', 'T 2081-2100']
     constraints_chain = np.column_stack(tuple(ds[constraint][:] for constraint in constraint_names))
-    data_loss_chain = ds['data_loss_chain'][:].data
-    prior_loss_chain = ds['prior_loss_chain'][:].data
-    constraint_loss_chain = ds['constraint_loss_chain'][:].data
     MAP = ds['MAP'][:].data
     if Ct is None:
         Ct = ds['Ct'][:,:].data
@@ -235,14 +225,12 @@ def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constrai
     config[params] = x
     config['seed'] = seed_chain[-1]
     loss = loss_chain[-1]
-    prior_loss = prior_loss_chain[-1]
-    data_loss = data_loss_chain[-1]
-    constraint_loss = constraint_loss_chain[-1]
+    # Run FaIR the first time
     fair = runFaIR(solar_forcing,volcanic_forcing,emissions,config,scenario,
-                   start=1750,end=2101)
+                   start=1750,end=2101,stochastic_run=stochastic_run)
     # Temperature anomaly compared to temperature mean between year 1850 and 1900
-    anomaly = fair.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0).to_numpy().squeeze() \
-            - fair.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
+    anomaly = fair.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0) -\
+              fair.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds')
     MAP_index = np.argmin(loss_chain)
     loss_MAP = loss_chain[MAP_index]
     MAP = chain[MAP_index,:]
@@ -254,9 +242,12 @@ def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constrai
     constraints_chain = np.append(constraints_chain,np.full((samples,9),np.nan), axis=0)
     seed_chain = np.append(seed_chain, np.full(samples,np.nan), axis=0)
     loss_chain = np.append(loss_chain, np.full(samples,np.nan), axis=0)
-    data_loss_chain = np.append(data_loss_chain, np.full(samples,np.nan), axis=0)
-    prior_loss_chain = np.append(prior_loss_chain, np.full(samples,np.nan), axis=0)
-    constraint_loss_chain = np.append(constraint_loss_chain, np.full(samples,np.nan), axis=0)
+    
+    if use_prior:
+        log_prior = get_log_prior(params)
+    constraints = compute_constraints(fair).squeeze()
+    if use_constraints:
+        log_constraint_target = get_log_constraint_target()
     
     proposal_config = MAP_config.copy()
     progress, accepted = 0, 0
@@ -269,21 +260,19 @@ def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constrai
         seed = npr.randint(0,int(6e8))
         proposal_config['seed'] = seed
         valid = validate_config(proposal_config,bounds=bounds)
-        prior_value = prior(proposal)
-        if not valid or prior_value == 0.0:
+        if not valid:
             log_acceptance = -np.inf
         else:
             fair_proposal = runFaIR(solar_forcing,volcanic_forcing,emissions,proposal_config,scenario,
-                                    start=1750,end=2101)
-            anomaly = fair_proposal.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0).to_numpy().squeeze() \
-                    - fair_proposal.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
-            data_loss_proposal = compute_data_loss(anomaly, data, var)
-            prior_loss_proposal = compute_prior_loss(prior, proposal)
-            loss_proposal = data_loss_proposal + prior_loss_proposal
+                                    start=1750,end=2101,stochastic_run=stochastic_run)
+            anomaly = fair_proposal.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0) -\
+                      fair_proposal.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds')
+            loss_proposal = compute_data_loss(anomaly,obs,var,data_loss_method=data_loss_method)
+            if use_prior:
+                loss_proposal += float(-log_prior(proposal.reshape((1,-1))))
             proposal_constraints = compute_constraints(fair_proposal)
             if use_constraints:
-                constraint_loss_proposal = compute_constrained_loss(proposal_constraints,targets)
-                loss_proposal += constraint_loss_proposal
+                loss_proposal += -float(log_constraint_target(constraints).squeeze())
             log_acceptance = -loss_proposal + loss
         #Accept or reject
         if np.log(npr.uniform(0,1)) <= log_acceptance:
@@ -292,21 +281,13 @@ def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constrai
                 MAP = x
                 loss_MAP = loss_proposal
             loss = loss_proposal
-            prior_loss = prior_loss_proposal
-            data_loss = data_loss_proposal
             constraints = proposal_constraints
-            if use_constraints:
-                constraint_loss = constraint_loss_proposal
             accepted += 1
         # Add new values to chains
         chain[t,:] = x
         seed_chain[t] = seed
-        data_loss_chain[t] = data_loss
-        prior_loss_chain[t] = prior_loss
         loss_chain[t] = loss
         constraints_chain[t,:] = constraints
-        if use_constraints:
-            constraint_loss_chain[t] = constraint_loss
         
         #Value in chain as column vector
         vec = chain[t,:].reshape((xdim,1))
@@ -320,9 +301,8 @@ def mcmc_extend(scenario,init_config,samples,prior=None,bounds=None,use_constrai
         if (t-t_start+1) / samples * 100 >= progress:
             print(f'{progress}%')
             # Save results after each 10 %
-            save_progress(scenario,warmup,Ct,chain[:(t+1),:],data_loss_chain[:(t+1)],prior_loss_chain[:(t+1)],
-                          loss_chain[:(t+1)],seed_chain[:(t+1)],MAP,
-                          constraints_arr = constraints_chain[:(t+1),:],filename=filename)
+            save_progress(scenario,warmup,Ct,chain[:(t+1),:],loss_chain[:(t+1)],seed_chain[:(t+1)],MAP,
+                          constraints_arr=constraints_chain[:(t+1),:],filename=filename)
             progress += 10
     print('...done')
     end_time = time.process_time() 
@@ -338,8 +318,8 @@ def create_file(scenario,params,warmup,C0,filename='sampling'):
     ncfile.createVariable('param', str, ('param',),fill_value=False)
     ncfile['param'][:] = np.array(params,dtype=str)
     ncfile.createVariable('chain',float,('sample','param'),fill_value=False)
-    ncfile.createVariable('data_loss_chain',float,('sample',),fill_value=False)
-    ncfile.createVariable('prior_loss_chain',float,('sample',),fill_value=False)
+    #ncfile.createVariable('data_loss_chain',float,('sample',),fill_value=False)
+    #ncfile.createVariable('prior_loss_chain',float,('sample',),fill_value=False)
     ncfile.createVariable('loss_chain',float,('sample',),fill_value=False)
     ncfile.createVariable('seeds',int,('sample',),fill_value=False)
     ncfile.createVariable('MAP',float,('param',),fill_value=False)
@@ -352,10 +332,9 @@ def create_file(scenario,params,warmup,C0,filename='sampling'):
     ncfile['warmup'][:] = warmup
     for constraint in ['ecs','tcr','T 1995-2014','ari','aci','aer','CO2','ohc','T 2081-2100']:
         ncfile.createVariable(constraint,float,('sample',),fill_value=np.nan)
-    ncfile.createVariable('constraint_loss_chain',float,('sample',),fill_value=0.0)
     ncfile.close()
 
-def save_progress(scenario,warmup,Ct,chain,data_loss_chain,prior_loss_chain,loss_chain,seeds,MAP,
+def save_progress(scenario,warmup,Ct,chain,loss_chain,seeds,MAP,
                   constraints_arr=None,folder='MC_results',filename='sampling'):
     N = len(chain)
     ncfile = Dataset(f'{folder}/{scenario}/{filename}.nc',mode='a')
@@ -363,23 +342,21 @@ def save_progress(scenario,warmup,Ct,chain,data_loss_chain,prior_loss_chain,loss
     if len(index) == 0:
         ncfile['sample'][:] = np.arange(0,N,1,dtype=int)
         ncfile['chain'][0:,:] = chain
-        ncfile['data_loss_chain'][0:N] = data_loss_chain
-        ncfile['prior_loss_chain'][0:N] = prior_loss_chain
+        #ncfile['data_loss_chain'][0:N] = data_loss_chain
+        #ncfile['prior_loss_chain'][0:N] = prior_loss_chain
         ncfile['loss_chain'][0:N] = loss_chain
         ncfile['seeds'][0:N] = seeds.astype(int)
         for i, constraint in enumerate(['ecs','tcr','ohc','T 1995-2014','ari','aci','aer', 'CO2', 'T 2081-2100']):
             ncfile[constraint][0:N] = constraints_arr[:,i]
-        ncfile['constraint_loss_chain'][0:N] = loss_chain - (prior_loss_chain + data_loss_chain)
     else:
         ncfile['sample'][:] = np.append(index,np.arange(index[-1]+1,N,1,dtype=int))
         ncfile['chain'][(index[-1]+1):N,:] = chain[(index[-1]+1):,:]
-        ncfile['data_loss_chain'][(index[-1]+1):N] = data_loss_chain[(index[-1]+1):]
-        ncfile['prior_loss_chain'][(index[-1]+1):N] = prior_loss_chain[(index[-1]+1):]
+        #ncfile['data_loss_chain'][(index[-1]+1):N] = data_loss_chain[(index[-1]+1):]
+        #ncfile['prior_loss_chain'][(index[-1]+1):N] = prior_loss_chain[(index[-1]+1):]
         ncfile['loss_chain'][(index[-1]+1):N] = loss_chain[(index[-1]+1):]
         ncfile['seeds'][(index[-1]+1):N] = seeds[(index[-1]+1):].astype(int)
         for i, constraint in enumerate(['ecs','tcr','T 1995-2014','ari','aci','aer', 'CO2', 'ohc', 'T 2081-2100']):
             ncfile[constraint][(index[-1]+1):N] = constraints_arr[(index[-1]+1):,i]
-        ncfile['constraint_loss_chain'][(index[-1]+1):N] = loss_chain[(index[-1]+1):] - (prior_loss_chain[(index[-1]+1):] + data_loss_chain[(index[-1]+1):])
     ncfile['Ct'][:,:] = Ct
     ncfile['MAP'][:] = MAP
     ncfile.close()

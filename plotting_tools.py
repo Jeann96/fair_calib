@@ -8,10 +8,13 @@ Created on Wed Feb 22 2023
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.stats import gaussian_kde
-from fair_tools import runFaIR,load_data,read_temperature_data,compute_data_loss,compute_prior_loss,compute_constrained_loss,compute_constraints,resample_constraint_posteriors,get_param_ranges
-# dotenv
-from fair_tools import cwd,cal_v,fair_v,constraint_set,constraint_ranges,constraint_targets
+from pandas import concat
+from scipy.stats import gaussian_kde,norm
+# Import data reading tools
+from fair_tools import read_forcing_data,read_gmst_temperature,read_hadcrut_temperature,compute_trends,constraint_targets
+from fair_tools import runFaIR,compute_data_loss,compute_prior_loss,compute_constrained_loss,compute_constraints,resample_constraint_posteriors,get_param_ranges,get_log_prior
+# dotenv parameters
+from fair_tools import cwd,cal_v,fair_v,constraint_set,constraint_ranges,get_log_constraint_target
 
 def plot_distributions(prior_configs,pos_configs,alpha=0.5,prior_color=None,pos_color=None,
                        title=None,savefig=False):
@@ -20,13 +23,11 @@ def plot_distributions(prior_configs,pos_configs,alpha=0.5,prior_color=None,pos_
         prior_color = default_colors[0] if prior_color is None else prior_color
         pos_color = default_colors[1] if pos_color is None else pos_color
     fig, axs = plt.subplots(7,7,figsize=(25,20))
-    #fig.canvas.set_window_title('Distributions')
     fig.tight_layout(pad=6)
     plt.ticklabel_format(useOffset=False)
     
     param_ranges = get_param_ranges()
     prior_names, pos_names = prior_configs.columns, pos_configs.columns
-    extra_params = [param for param in pos_names if param not in prior_names]
     for n in range(len(prior_names)):
         name = prior_names[n]
         row, col = (n-n%7)//7, n%7
@@ -36,7 +37,8 @@ def plot_distributions(prior_configs,pos_configs,alpha=0.5,prior_color=None,pos_
             axs[row][col].hist(pos_configs[name].values,density=True,alpha=alpha,range=param_ranges[name],
                                bins=int(np.ceil(1.5*np.sqrt(len(pos_configs)))),color=pos_color)
         axs[row][col].set_title(name)
-        
+    
+    extra_params = [param for param in pos_names if param not in prior_names]
     if len(extra_params) != 0:
         for n in range(len(prior_names),len(prior_names)+len(extra_params)):
             name = extra_params[n-len(prior_names)]
@@ -44,7 +46,8 @@ def plot_distributions(prior_configs,pos_configs,alpha=0.5,prior_color=None,pos_
             axs[row][col].hist(pos_configs[name].values,density=True,alpha=alpha,range=param_ranges[name],
                                bins=int(np.ceil(1.5*np.sqrt(len(pos_configs)))),color=pos_color)
             axs[row][col].set_title(name)
-            
+    
+    
     for n in range(n+1,7*7):
         row, col = (n-n%7)//7, n%7
         axs[row][col].set_xticks(ticks=[],labels=[])
@@ -52,12 +55,93 @@ def plot_distributions(prior_configs,pos_configs,alpha=0.5,prior_color=None,pos_
     if title is not None:
         plt.suptitle(title,fontsize=20)
     if savefig:
-        plt.savefig(f"plots/{title.lower().replace(' ', '_')}")
+        save_name = title.lower().replace(' ', '_')
+        plt.savefig(f"figures/distributions/{save_name}")
     else:
-        plt.show() 
+        plt.show()
+        
+def sensitivity_test(config,included,param_ranges,ylims=None,stochastic_run=True,use_constraints=True,
+                     data_loss_method='wss',N=500,scenario='ssp245',savefig=True):
+    # Read data
+    gmst = read_gmst_temperature()
+    gmst = gmst.rename({'year':'timebounds'})
+    T = read_hadcrut_temperature()
+    T = T.rename({'year':'timebounds'})
+    if data_loss_method == 'wss':
+        obs, var = gmst, T.std(dim='realization')**2
+    elif data_loss_method == 'trend':
+        trends = compute_trends()
+        obs, var = np.mean(trends), np.std(trends)**2
+
+    solar_forcing, volcanic_forcing, emissions = read_forcing_data(scenario,N,1750,2101)
+    configs = concat([config]*N, ignore_index=True, axis='rows')
+    log_prior = get_log_prior(included)
+    if use_constraints:
+        log_constraint_target = get_log_constraint_target()
     
+    shape = layout_shape(len(included))
+    fig, axs = plt.subplots(shape[1],shape[0],figsize=(35,20))
+    fig.tight_layout(pad=6)
+    plt.ticklabel_format(useOffset=False)
+    if ylims is None:
+        ylims_dict = {}
+    for n in range(len(included)):
+        param = included[n]
+        print(param)
+        # List of different values for a parameter
+        if param == 'gamma':
+            param_min, param_max = 0.25, max(param_ranges[param])
+        else:
+            param_min, param_max = min(param_ranges[param]),max(param_ranges[param])
+        configs[param] = np.linspace(param_min,param_max,N)
+        fair = runFaIR(solar_forcing,volcanic_forcing,emissions,configs,scenario,
+                       start=1750,end=2101,stochastic_run=stochastic_run)
+        anomaly = fair.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0) -\
+                  fair.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds')
+        losses = compute_data_loss(anomaly,obs,var,method=data_loss_method)
+        losses += compute_prior_loss(log_prior,configs[included].to_numpy())
+        if use_constraints:
+            constraints = compute_constraints(fair)
+            losses += compute_constrained_loss(constraints,log_constraint_target)
+            
+        row, col = (n - n % shape[0])//shape[0], n % shape[0]
+        axs[row][col].plot(configs[param].values,losses,'k-')
+        if ylims is not None:
+            axs[row][col].set_ylim(min(ylims),max(ylims))
+        else:
+            ylims_dict[param] = [min(losses),max(losses)]
+        #axs[row][col].set_xlabel(param)
+        axs[row][col].set_title(param,fontsize=12)
+        
+        # Reset param
+        configs[param] = np.repeat(float(config[param]),N)
+    
+    for n in range(n+1,np.prod(shape)):
+        row, col =  (n - n % shape[0])//shape[0], n % shape[0]
+        axs[row][col].set_xticks(ticks=[],labels=[])
+        axs[row][col].set_yticks(ticks=[],labels=[])
+    
+    if ylims is None:
+        minlims = np.array([min(ylims_dict[param]) for param in included])
+        minlims = minlims[~np.isinf(minlims) & ~np.isnan(minlims)]
+        min_min = np.min(minlims)
+        min_median = np.median(minlims)
+        ymin = min_median - 1.1 * (min_median-min_min)
+        ymax = min_median + 1.5 * (min_median-min_min)
+        for n in range(len(included)):
+            row, col = (n - n % shape[0])//shape[0], n % shape[0]
+            axs[row][col].set_ylim(ymin,ymax)
+        
+    #plt.suptitle(f'Sentivity test, {data_loss_method} loss function',fontsize=24)
+    if savefig:
+        plt.savefig(f'figures/sensitivity/loss_sensitivity_{data_loss_method}')
+    else:
+        plt.show()
     
 def layout_shape(N,threshold=3):
+    '''
+    Find suitable layout for several images.
+    '''
     if np.sqrt(N).is_integer():
         return (int(np.sqrt(N)),int(np.sqrt(N)))
     elif N in [2,3,5]:
@@ -71,7 +155,7 @@ def layout_shape(N,threshold=3):
                     if a*b == N:
                         return (a,b)
                 a += 1
-            N += 1   
+            N += 1
     
 def plot_chains(chain,params=None):
     if params is None:
@@ -81,7 +165,6 @@ def plot_chains(chain,params=None):
     N = len(chain)
     shape = layout_shape(len(params))
     fig, axs = plt.subplots(shape[1],shape[0],figsize=(30,25))
-    #fig.canvas.set_window_title('Distributions')
     fig.tight_layout(pad=5)
     plt.ticklabel_format(useOffset=False)
     for n in range(len(params)):
@@ -97,71 +180,9 @@ def plot_chains(chain,params=None):
         axs[row][col].set_yticks(ticks=[],labels=[])
     plt.show()
     
-def plot_loss_test(config,params,param_ranges,prior=None,targets=None,model_var=None,
-                   scenario='ssp245',N=100,ylims=None):
-    solar_forcing, volcanic_forcing, emissions = load_data(scenario,1,1750,2100)
-    data, std = read_temperature_data()
-    data, var = data.data, std.data**2
-    if model_var is not None:
-        var += model_var
-    shape = layout_shape(len(params))
-    fig, axs = plt.subplots(shape[1],shape[0],figsize=(40,25))
-    #fig.canvas.set_window_title('Distributions')
-    fig.tight_layout(pad=5)
-    plt.ticklabel_format(useOffset=False)
-    if ylims is None:
-        ylims_dict = {}
-    for n in range(len(params)):
-        name = params[n]
-        orig_val = float(config[name])
-        print(f'Param: {name}')
-        vals = np.linspace(min(param_ranges[name]),max(param_ranges[name]),N)
-        losses = []
-        for param_val in vals:
-            config[name] = param_val
-            fair = runFaIR(solar_forcing,volcanic_forcing,emissions,config,scenario,
-                           start=1750,end=2100)
-            # Temperature anomaly compared to temperature mean between year 1850 and 1900
-            anomaly = fair.temperature.sel(timebounds=slice(1851,2021),scenario=scenario,layer=0).to_numpy().squeeze() \
-                    - fair.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
-            # Compute loss (negative log-likehood) from data, prior and constraints
-            loss = compute_data_loss(anomaly, data, var)
-            if prior is not None:
-                loss += compute_prior_loss(prior, config[params].to_numpy().squeeze())
-            if targets is not None:
-                loss += compute_constrained_loss(compute_constraints(fair),targets)
-            losses.append(loss)
-        row, col = (n-n % shape[0])//shape[0], n % shape[0]
-        axs[row][col].set_title(name)
-        axs[row][col].plot(vals,losses,linestyle='-',color='black',linewidth=2)
-        if ylims is not None:
-            axs[row][col].set_ylim(min(ylims),max(ylims))
-        else:
-            ylims_dict[name] = [min(losses),max(losses)]
-        # Reset param
-        config[name] = orig_val
-    for n in range(len(params),shape[0]*shape[1]):
-        row, col = (n-n % shape[0])//shape[0], n % shape[0]
-        axs[row][col].set_xticks(ticks=[],labels=[])
-        axs[row][col].set_yticks(ticks=[],labels=[])
-    # Scale ylims to suitable values if not provided beforehand
-    if ylims is None:
-        minlims = np.array([min(ylims_dict[name]) for name in params])
-        minlims = minlims[~np.isinf(minlims) & ~np.isnan(minlims)]
-        min_min = np.min(minlims)
-        min_median = np.median(minlims)
-        
-        ymin = min_median - 1.1 * (min_median-min_min)
-        #maxlims = np.array([max(ylims_dict[name]) for name in params])
-        #maxlims = maxlims[~np.isinf(maxlims) & ~np.isnan(maxlims)]
-        #min_max, max_max = np.min(maxlims), np.max(maxlims)
-        ymax = min_median + 1.5 * (min_median-min_min)
-        for n in range(len(params)):
-            row, col = (n-n % shape[0])//shape[0], n % shape[0]
-            axs[row][col].set_ylim(ymin,ymax)
-    plt.show()
-    
-def plot_temperature(scenario,start,end,prior,posterior,MAP,data,std,savefig=True):
+def plot_temperature(scenario,start,end,prior,posterior=None,MAP=None,obs=None,obs_std=None,
+                     plot_trend=False,savefig=True):
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     years = list(range(start,end+1))
     T_fig = plt.figure('T_figure',figsize=(10,5))
     ax_T = T_fig.gca()
@@ -170,30 +191,46 @@ def plot_temperature(scenario,start,end,prior,posterior,MAP,data,std,savefig=Tru
     ax_T.set_ylabel('Temperature (°C)')
     plt.ylim(-1.5,4)
     
-    ax_T.fill_between(data.year,data.data-std.data*1.96,data.data+std.data*1.96,color='red',alpha=0.5)
+    prior_T = prior.temperature.sel(timebounds=slice(start,end),scenario=scenario,layer=0) \
+            - prior.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
+    prior_mean = prior_T.mean(axis=1).data.squeeze()
+    ax_T.plot(years, prior_mean, linestyle='-', color=colors[0], label='calib')
+    if obs is None and obs_std is not None:
+        prior_slice = prior.temperature.loc[dict(timebounds=obs_std.year.data,scenario=scenario,layer=0)].data.squeeze()
+        ax_T.fill_between(obs_std.year.data,prior_slice-obs_std.data*1.96,prior_slice+obs_std.data*1.96,color=colors[2],alpha=0.4)
+    else:
+        prior_std = prior_T.std(axis=1)
+        ax_T.fill_between(years,prior_mean-prior_std.data*1.96,prior_mean+prior_std.data*1.96,color=colors[0],alpha=0.4)
     
-    prior = prior.temperature.loc[dict(timebounds=slice(start,end),scenario=scenario,layer=0)]
-    prior_mean, prior_std = prior.mean(axis=1), prior.std(axis=1)
-    ax_T.plot(years, prior_mean, linestyle='-', color='red', label='prior')
-    ax_T.fill_between(years,prior_mean-prior_std*1.96,prior_mean+prior_std*1.96,color='red',alpha=0.3)
+    if posterior is not None:
+        posterior = posterior.temperature.sel(timebounds=slice(start,end),scenario=scenario,layer=0) \
+                  - posterior.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
+        posterior_mean = posterior.mean(axis=1).data.squeeze()
+        posterior_std = posterior.std(axis=1).data.squeeze()
+        ax_T.plot(years, posterior_mean, linestyle='-', color=colors[1], markersize=2, label='posterior')
+        ax_T.fill_between(years,posterior_mean-posterior_std*1.96,posterior_mean+posterior_std*1.96,color=colors[1],alpha=0.4)
     
-    posterior = posterior.temperature.loc[dict(timebounds=slice(start,end),scenario=scenario,layer=0)]
-    posterior_mean, posterior_std = posterior.mean(axis=1), posterior.std(axis=1)
-    ax_T.plot(years, posterior_mean, linestyle='-', color='blue', markersize=2, label='posterior mean')
-    ax_T.fill_between(years,posterior_mean-posterior_std*1.96,posterior_mean+posterior_std*1.96,color='blue',alpha=0.3)
+    if MAP is not None:
+        MAP_temperature = MAP.temperature.sel(timebounds=slice(start,end),scenario=scenario,layer=0) \
+                        - MAP.temperature.sel(timebounds=slice(1851,1901),scenario=scenario,layer=0).mean(dim='timebounds').to_numpy()
+        ax_T.plot(years, MAP_temperature.data.squeeze(), linestyle='-', color='black', markersize=2, label='MAP')
     
-    MAP_temperature = MAP.temperature.loc[dict(timebounds=slice(start,end),scenario=scenario,layer=0)]
-    ax_T.plot(years, MAP_temperature, linestyle='-', color='black', markersize=2, label='maximum posterior')
-    
-    ax_T.plot(data.year, data.data, linestyle='-', color='orange', label='Temperature observation')
-    ax_T.plot(data.year, data.data-1.96*std.data,linestyle='--',color='orange')
-    ax_T.plot(data.year, data.data+1.96*std.data,linestyle='--',color='orange')
+    if obs is not None:
+        ax_T.plot(obs.year, obs.data, linestyle='-', color=colors[2], label='observation')
+        if obs_std is not None:
+            ax_T.fill_between(obs.year,obs.data-1.96*obs_std.data,obs.data+1.96*obs_std.data,color=colors[2],alpha=0.4)
+        if plot_trend:
+            x = np.arange(1900,2021,1)
+            y = obs.sel(year=slice(1900,2020)).data
+            params = np.polyfit(x,y,1)
+            ax_T.plot(x,params[0] * x + params[1], label='trend line 1900-2020', color='black')
     
     ax_T.legend(loc='upper left')
     if savefig:
-        plt.savefig('plots/temperature_trend')
+        plt.savefig(f'figures/trends/temperature_trend_{min(years)}-{max(years)}')
+        #plt.savefig(f'figures/stochastic_vs_deterministic_{min(years)}-{max(years)}')
     else:
-        plt.show()
+        return T_fig
     
 def plot_specie(start,end,prior,posterior,savefig=True):
     '''
@@ -208,7 +245,23 @@ def plot_specie(start,end,prior,posterior,savefig=True):
     ax_specie.set_xlabel('year')
     ax_specie.set_ylabel('concentration')
     if savefig:
-        plt.savefig('plots/specie_concentration')
+        plt.savefig('figures/trends/specie_concentration')
+    else:
+        plt.show()
+        
+def plot_trends(T,start=1900,end=2020,savefig=True):
+    trends = compute_trends(start=start,end=end)
+    trend_fig = plt.figure('trend_hist',figsize=(10,5))
+    mean, std = np.mean(trends), np.std(trends)
+    ax = trend_fig.gca()
+    ax.hist(trends,bins=int(np.ceil(np.sqrt(1.1*len(trends)))),density=True,edgecolor='black',label='histogram')
+    x = np.linspace(min(trends),max(trends),500)
+    ax.plot(x,norm.pdf(x, mean, std), 'k-', label='normal density')
+    ax.set_title(f'Trends {start}-{end}')
+    ax.set_xlabel('slope')
+    ax.legend()
+    if savefig:
+        plt.savefig(f'figures/trends/trend_histogram_{start}-{end}')
     else:
         plt.show()
     
@@ -464,7 +517,6 @@ def plot_constraints(MC_sampling,N=1000,thinning=1,plot_histo=True,alpha=0.6,col
 
     fig.tight_layout()
     if savefig:
-        plt.savefig('plots/constraints')
+        plt.savefig('figures/distributions/constraints')
     else:
         plt.show()
-    
