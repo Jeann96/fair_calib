@@ -877,11 +877,19 @@ def compute_data_loss(model,mean,var,method='wss'):
     if method == 'wss':
         wss = ((model-mean)**2/var).sum(dim='timebounds')
         loss = 0.5 * (wss + (np.log(2*np.pi*var)).sum(dim='timebounds')).data
-    elif method == 'trend':
-        x = np.arange(1900,2021,1)
-        y = model.sel(timebounds=slice(1900,2020)).data
+    elif method == 'trend_line':
+        start, end = 1900, 2020
+        x = np.arange(start,end+1,1)
+        y = model.sel(timebounds=slice(start,end)).data
         params = np.polyfit(x,y,1)
         loss = 0.5 * (np.square(params[0]-mean)/var + np.log(2*np.pi*var))
+    elif method == 'detrend':
+        start, end = 1850, 2020
+        y = model.sel(timebounds=slice(start,end+1)).data.T
+        x = np.arange(0,end-start+1,1)
+        detrended = detrend(x,y)
+        std = np.std(detrended)
+        loss = 0.5 * (np.square(std-mean)/var + np.log(2*np.pi*var))
     else:
         raise ValueError(f'Unknown data loss method {method}')
     return loss
@@ -919,12 +927,21 @@ def compute_constraints(fair):
               fair.ocean_heat_content_change.sel(timebounds=1972,scenario='ssp245')).to_numpy() / 1e21
     # Average temperature between years 2081-2100 compared with temperature from years 1995-2014 using scenario ssp245
     out[8] = (fair.temperature.sel(timebounds=slice(2082,2101),scenario='ssp245',layer=0).mean(dim='timebounds') -
-                   fair.temperature.sel(timebounds=slice(1996,2015),scenario='ssp245',layer=0).mean(dim='timebounds')).to_numpy()
+              fair.temperature.sel(timebounds=slice(1996,2015),scenario='ssp245',layer=0).mean(dim='timebounds')).to_numpy()
     return out
 
-def compute_trends(start=1900,end=2020):
-    T = read_hadcrut_temperature()
+def compute_trends(data,xdim,start=1900,end=2020):
+    if not isinstance(data, xr.DataArray):
+        raise ValueError("Input must be an xarray DataArray.")
     x = np.arange(start,end+1,1)
-    y = T.sel(year=slice(start,end)).data.T
+    y = data.loc[{xdim:slice(start,end)}].data.T
     params = np.polyfit(x,y,1)
     return params[0]
+
+def detrend(x,y,order=4):
+    coefs = np.polyfit(x,y.T,order)
+    out = coefs[order,:].reshape((-1,1)) * np.ones((1,len(x)))
+    for n in range(order-1,-1,-1):
+        out += coefs[n,:].reshape((-1,1)) * (x.reshape((1,-1)))**(order-n)
+    # Detrend and return the data
+    return out-y

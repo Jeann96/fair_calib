@@ -14,7 +14,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 from scipy.stats import norm
 
-from fair_tools import runFaIR, load_calib_samples, load_data
+from fair_tools import runFaIR, read_calib_samples, read_forcing_data
 
 cwd = os.getcwd()
 
@@ -41,7 +41,7 @@ data['HadCrut5']=data['HadCrut5']-data['HadCrut5'].loc[dict(year=slice(1850,1900
 
 
 
-def detrend_dataarray(data_array, dim, order=4, return_trend=False):
+def detrend_xarray(data_array, dim, order=4, return_trend=False):
     """
     Generated with ChatGPT4
     Detrends an xarray DataArray using a polynomial of specified order.
@@ -85,14 +85,14 @@ std_hadcrut5=np.zeros(number_of_realizations)
 detrended_hadcrut=xr.zeros_like(data['HadCrut5'])
 trend_hadcrut=xr.zeros_like(data['HadCrut5'])
 for i in range(1,number_of_realizations+1):
-    trend_hadcrut.loc[dict(realization=i)], detrended_hadcrut.loc[dict(realization=i)]=detrend_dataarray(data['HadCrut5'].loc[dict(realization=i)],'year', return_trend=True)
+    trend_hadcrut.loc[dict(realization=i)], detrended_hadcrut.loc[dict(realization=i)]=detrend_xarray(data['HadCrut5'].loc[dict(realization=i)],'year', return_trend=True)
     std_hadcrut5[i-1]=float(detrended_hadcrut.loc[dict(realization=i)].std())
     
 
 # Load FaIR calibration and carry out model runs
-calib_configs = load_calib_samples()
+calib_configs = read_calib_samples()
 scenario = 'ssp245'
-solar_forcing, volcanic_forcing, emissions = load_data(scenario,len(calib_configs),1750,2100)
+solar_forcing, volcanic_forcing, emissions = read_forcing_data(scenario,len(calib_configs),1750,2100)
 fair_calib = runFaIR(solar_forcing,volcanic_forcing,emissions,calib_configs,scenario,
                      start=1750,end=2100)
 
@@ -113,10 +113,10 @@ trend_fair_det=xr.zeros_like(fair_calib.temperature.loc[dict(layer=0)])
 
 
 for i, config in enumerate(calib_configs.index):
-    trend_fair.loc[dict(config=config)], detrended_fair.loc[dict(config=config)]=detrend_dataarray(fair_calib.temperature.loc[dict(layer=0, config=config) ],'timebounds', return_trend=True)
+    trend_fair.loc[dict(config=config)], detrended_fair.loc[dict(config=config)]=detrend_xarray(fair_calib.temperature.loc[dict(layer=0, config=config) ],'timebounds', return_trend=True)
     std_fair[i]=float((detrended_fair.loc[dict(config=config)].std()))
     
-    trend_fair_det.loc[dict(config=config)], detrended_fair_det.loc[dict(config=config)]=detrend_dataarray(fair_calib_det.temperature.loc[dict(layer=0, config=config) ],'timebounds', return_trend=True)
+    trend_fair_det.loc[dict(config=config)], detrended_fair_det.loc[dict(config=config)]=detrend_xarray(fair_calib_det.temperature.loc[dict(layer=0, config=config) ],'timebounds', return_trend=True)
     std_fair_det[i]=float((detrended_fair_det.loc[dict(config=config)].std()))
 
 # Calculate correlation coefficients for all parameters
@@ -240,5 +240,3 @@ fair_calib.temperature.loc[dict(layer=0,timebounds=2100)].plot.hist(bins=25,weig
 ax5[1].set_title('Temperature at 2100')
 ax5[1].legend()
 fig5.savefig(f'{figdir}/temperature_distribution_2020_and_2100.png', dpi=150)
-
-fig6, ax6=pl.subplots(1,1)

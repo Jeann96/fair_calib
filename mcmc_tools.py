@@ -13,7 +13,7 @@ import time
 # Functions realted to the observations from fair_tools
 from fair_tools import read_forcing_data,read_gmst_temperature,read_hadcrut_temperature,compute_trends
 # Sampling and computation related functions from fair_tools
-from fair_tools import runFaIR,compute_data_loss,compute_constraints,get_log_prior,get_log_constraint_target
+from fair_tools import runFaIR,compute_data_loss,compute_constraints,get_log_prior,get_log_constraint_target,detrend
 from fair.energy_balance_model import EnergyBalanceModel
 from netCDF4 import Dataset
 import os
@@ -70,9 +70,14 @@ def mcmc_run(scenario,init_config,names,samples,warmup,C0=None,bounds=None,use_c
     T = T.rename({'year':'timebounds'})
     if data_loss_method == 'wss':
         obs, var = gmst, T.std(dim='realization')**2
-    elif data_loss_method == 'trend':
+    elif data_loss_method == 'trend_line':
         trends = compute_trends()
         obs, var = np.mean(trends), np.std(trends)**2
+    elif data_loss_method == 'detrend':
+        y = T.sel(timebounds=slice(1850,2021)).data
+        detrended = detrend(np.arange(0,2020-1850+1,1),y)
+        std = np.std(detrended,axis=1)
+        obs, var = np.mean(std), np.std(std)**2
     # Run FaIR the first time
     fair = runFaIR(solar_forcing,volcanic_forcing,emissions,init_config,scenario,
                    start=1750,end=2101,stochastic_run=stochastic_run)
@@ -200,7 +205,7 @@ def mcmc_extend(scenario,init_config,samples,bounds=None,use_constraints=True,us
     if data_loss_method == 'wss':
         obs, var = gmst, T.std(dim='realization')**2
     elif data_loss_method == 'trend':
-        trends = compute_trends()
+        trends = compute_trends(T)
         obs, var = np.mean(trends), np.std(trends)**2
 
     ds = Dataset(f'{cwd}/{folder}/{scenario}/{filename}.nc','r')
