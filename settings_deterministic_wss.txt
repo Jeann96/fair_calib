@@ -1,0 +1,10 @@
+warmup = 1000
+samples = 1000
+thinning = 10
+scenario = ssp245
+use_default_priors = True
+use_default_constraints = True
+T_variability_constraint = True
+target_log_likelihood = wss
+stochastic = False
+plot = False

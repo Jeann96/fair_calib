@@ -7,126 +7,164 @@ Created on Tue Feb 7 14:39:15 2023
           Janne Nurmela (janne.nurmela@fmi.fi)
 """
 
-import numpy as np
-import os
 import sys
-
-fair_path = 'FAIR/src/'
-if fair_path not in sys.path:
-    sys.path.append(fair_path)
-
-cwd = os.getcwd()
-from fair_tools import runFaIR, get_param_ranges
-# Import data reading tools
-from fair_tools import read_forcing_data,read_calib_samples,read_prior_samples,read_MC_samples,read_gmst_temperature,read_hadcrut_temperature
-from plotting_tools import plot_distributions, plot_temperature, plot_constraints
-from mcmc_tools import mcmc_run, mcmc_extend
-from netCDF4 import Dataset
-
+import os
+#import warnings
+#warnings.simplefilter("ignore",ResourceWarning)
+import numpy as np
+from pandas import concat
+from fair_tools import setup_fair,run_configs,get_param_ranges,temperature_variation
+from plotting_tools import plot_distributions,plot_temperature,plot_constraints
+from mcmc_tools import mcmc_run
+from data_handling import cwd,transform_df
+from data_handling import read_settings,read_forcing,read_calib_samples,read_prior_samples,read_temperature_obs
 figdir = f"{cwd}/figures"
 result_folder = 'MC_results'
-filename = 'detrend_chain'
+filename = 'test'
 #filename = 'stochastic_chain'
-#filename = 'deterministic_chain'
+#filename = 'deterministic_chain_wss'
+#filename = 'server_chain'
 
-# Choose FaIR scenario (do not change)
-scenario = 'ssp245'
-# Length of the warmup (burn-in) period
-warmup = 1000
-# Number of samples collected after the warmup
-samples = 1000
+settings_file = 'settings_deterministic_wss.txt'
+use_settings_file = True
 
-# If true, removes the old file and starts samplin new one
-new_chain = True
-# If true, extends the existing chain equal to the number of {samples}
-extend = False
-# Covariance for the proposal distribution used for extending the chain
-cov_file = 'Ct'
-# Include prior and/or constraints for the sampling
-use_prior = True
-use_constraints = True
-# Data loss method
-data_loss_method = 'detrend'
-# Stochastic or deterministic run
-stochastic = True
-# Plot figures and save figures
-plot = False
-save_figs = False
+if use_settings_file:
+    settings = read_settings(settings_file)
+    warmup, nsamples = settings['warmup'], settings['samples']
+    thinning = settings['thinning']
+    new_chain = True
+    extend = False
+    use_default_priors = settings['use_default_priors']
+    use_default_constraints = settings['use_default_constraints']
+    use_T_variability = settings['T_variability_constraint']
+    target_log_likelihood = settings['target_log_likelihood']
+    stochastic = settings['stochastic']
+    plot = settings['plot']
+    scenario = settings['scenario']
+else:
+    scenario = 'ssp245'
+    warmup, nsamples = 100000, 1000000
+    new_chain = False
+    extend = False
+    cov_file = 'Ct'
+    use_default_priors = True
+    use_default_constraints = True
+    T_variability_constraint = False
+    target_log_likelihood = 'wss'
+    stochastic = False
+    plot = True
 
 ### MAIN PROGRAM STARTS HERE
 # Read prior and calibration configurations
-calib_configs = read_calib_samples()
-prior_configs = read_prior_samples()
-param_ranges = get_param_ranges()
-param_means = dict(prior_configs.mean(axis='rows'))
-param_stds = dict(prior_configs.std(axis='rows'))
-# List of paramters which are not sampled using MCMC
-excluded = ['gamma','sigma_xi','sigma_eta','ari CH4','ari N2O','ari NH3','ari NOx','ari VOC',
-            'ari Equivalent effective stratospheric chlorine','seed']
-#excluded = ['ari CH4','ari N2O','ari NH3','ari NOx','ari VOC',
-#            'ari Equivalent effective stratospheric chlorine','seed']
-# Parameters which are sampled using MCMC
-included = [param for param in prior_configs.columns if param not in excluded]
-print(f'Parameters included for sampling:\n{included}')
-print(f'Filename: {filename}.nc')
+#scenarios = ['ssp126','ssp245','ssp370']
+#scenarios = ['ssp126']
 
-if not os.path.exists(f'{cwd}/{result_folder}/{scenario}'):
-    os.makedirs(f'{cwd}/{result_folder}/{scenario}')
+prior_configs_orig = read_prior_samples(dtype=np.float64)
+calib_configs_orig = read_calib_samples(dtype=np.float64)
+
+log_scale_transformation = {'aci_beta': lambda x: np.log(-x),
+                            'aci_shape_SO2': lambda x: np.log(x),
+                            'aci_shape_BC': lambda x: np.log(x),
+                            'aci_shape_OC': lambda x: np.log(x)}
+name_changes = {'aci_beta': 'log(-aci_beta)',
+                'aci_shape_SO2': 'log(aci_shape_SO2)',
+                'aci_shape_BC': 'log(aci_shape_BC)',
+                'aci_shape_OC': 'log(aci_shape_OC)'}
+exp_scale_transformation = {'log(-aci_beta)': lambda x: -np.exp(x),
+                            'log(aci_shape_SO2)': lambda x: np.exp(x),
+                            'log(aci_shape_BC)': lambda x: np.exp(x),
+                            'log(aci_shape_OC)': lambda x: np.exp(x)}
+
+
+prior_configs_transformed = transform_df(prior_configs_orig,log_scale_transformation,name_changes=name_changes)
+calib_configs_transformed = transform_df(calib_configs_orig,log_scale_transformation,name_changes=name_changes).dropna(axis='index')
+
+param_ranges = get_param_ranges()
+#param_means = dict(prior_configs.mean(axis='rows'))
+#param_stds = dict(prior_configs.std(axis='rows'))
+
+# List of paramters which are not sampled using MCMC
+excluded = ['seed']
+# Parameters which are sampled using MCMC
+included = [param for param in prior_configs_transformed.columns if param not in excluded]
+#print(f'Parameters included for sampling:\n{included}')
+os.makedirs(f'{cwd}/{result_folder}', exist_ok=True)
+    
+C0 = np.diag(np.square(prior_configs_transformed[included].std(axis='rows').to_numpy() / 1.96))
 
 # Read data
-gmst = read_gmst_temperature()
-T = read_hadcrut_temperature()
+#obs, unc = read_temperature_obs()
+#gmst = read_gmst_temperature()
+#T, T_unc = read_hadcrut()
+#solar_forcing, volcanic_forcing = read_forcing(1750,2100)
 
-solar_forcing, volcanic_forcing, emissions = read_forcing_data(scenario,len(calib_configs),1750,2100)
-fair_calib = runFaIR(solar_forcing,volcanic_forcing,emissions,calib_configs,scenario,
-                     start=1750,end=2100,stochastic_run=stochastic)
+#fair_setup = init_fair([scenario],len(calib_configs_orig),emissions,start=1750,end=2100)
+#fair_calib = run_configs(fair_setup,calib_configs_orig,solar_forcing,volcanic_forcing,start=1750,end=2100)
+#plot_temperature(fair_calib,start=1750,end=2100,obs=T,obs_std=T_unc,savefig=False)
 
-#model_var = 0.35**2
-init_config = prior_configs.median(axis=0).to_frame().transpose()
-seed = np.random.randint(*param_ranges['seed'])
-init_config['seed'] = seed
-#init_config['gamma'] = max(param_ranges['gamma'])
+init_config = prior_configs_transformed.median(axis='rows').to_frame().transpose()
+init_config['seed'] = 12345
+#seed = np.random.randint(min(param_ranges['seed']),max(param_ranges['seed']))
 
-C0 = np.diag(np.square(0.2*prior_configs[included].std(axis=0).to_numpy()))
-#C0 = np.diag((0.01 * init_config[included].to_numpy().squeeze())**2)
-solar_forcing, volcanic_forcing, emissions = read_forcing_data(scenario,1,1750,2100)
-fair_init = runFaIR(solar_forcing,volcanic_forcing,emissions,init_config,scenario,
-                     start=1750,end=2100,stochastic_run=stochastic)
+
+'''
+param = 'clim_sigma_xi'
+configs = concat([init_config]*101, ignore_index=True, axis='rows')
+configs[param] = np.linspace(min(param_ranges[param]),max(param_ranges[param]),101)
+'''
+'''
+fair_allocated = setup_fair([scenario], 1, start=1750, end=2100)
+fair_init = run_configs(fair_allocated,transform_df(init_config,exp_scale_transformation,
+                                                    name_changes={'log(-aci_beta)':'aci_beta',
+                                                                  'log(aci_shape_SO2)':'aci_shape_SO2',
+                                                                  'log(aci_shape_BC)':'aci_shape_BC',
+                                                                  'log(aci_shape_OC)':'aci_shape_OC'}),
+                        solar_forcing,volcanic_forcing,start=1750,end=2100)
+'''
+
+#fair_init = run_configs(fair_setup,init_config,solar_forcing,volcanic_forcing,start=1750,end=2100)
+sys.exit()
 if new_chain:
-    mcmc_run(scenario,init_config,included,samples,warmup,C0=C0,use_constraints=use_constraints,use_prior=use_prior,
-             stochastic_run=stochastic,filename=filename,data_loss_method=data_loss_method)
+    print(f'Starting new chain with filename "{filename}.nc"')
+    mcmc_run(scenario,init_config,included,nsamples,warmup,thinning=thinning,C0=C0,default_constraints=use_default_constraints,
+             default_priors=use_default_priors,T_variability=use_T_variability,
+             stochastic_run=stochastic,target_log_likelihood=target_log_likelihood,filename=filename)
+'''
 if extend:
+    print(f'Appending to existing chain {filename}.nc')
     Ct = np.loadtxt(cov_file) if os.path.exists(cov_file) else None
     mcmc_extend(scenario,init_config,samples,use_constraints=use_constraints, 
                 stochastic_run=stochastic,Ct=Ct,filename=filename,data_loss_method=data_loss_method)
+'''
 
-if plot:
-    ds = Dataset(f'{result_folder}/{scenario}/{filename}.nc',mode='r')
-    loss = ds['loss_chain'][:].data
-    chain, seeds = ds['chain'][:,:].data, ds['seeds'][:].data
-    
+ds = read_chain(f'{result_folder}/{scenario}/{filename}.nc')
+loss = ds['loss_chain'][:].data
+chain, seeds = ds['chain'][:,:].data, ds['seeds'][:].data
+
+
+'''
+if plot:    
     MAP_index = warmup + np.argmin(loss[warmup:])
     MAP_config = init_config.copy()
     MAP_config[included] = chain[MAP_index,:]
     MAP_config['seed'] = seeds[MAP_index]
     
-    full_pos_configs = read_MC_samples(ds,param_ranges,param_means,param_stds,N=10000,thinning=50)
-    plot_distributions(prior_configs,calib_configs,alpha=0.6,title='Prior vs calibration',savefig=save_figs)
-    plot_distributions(prior_configs,full_pos_configs[included],alpha=0.6,title='Prior vs MC sampling',savefig=save_figs)
-    plot_distributions(calib_configs,full_pos_configs[included],alpha=0.6,title='Calib vs MC sampling',savefig=save_figs)
+    full_pos_configs = read_MC_samples(ds,param_ranges,param_means,param_stds,N=2000,thinning=1)
+    plot_distributions(prior_configs,calib_configs,alpha=0.6,title='Prior vs Calib',savefig=True)
+    plot_distributions(prior_configs,full_pos_configs[included],alpha=0.6,title='Prior vs MC sampling',savefig=True)
+    plot_distributions(calib_configs,full_pos_configs[included],alpha=0.6,title='Calib vs MC sampling',savefig=True)
     
     #Run fair with chosen number of configuration chosen from the parameter posterior
-    pos_configs = read_MC_samples(ds,param_ranges,param_means,param_stds,N=2000,thinning=200)
+    pos_configs = read_MC_samples(ds,param_ranges,param_means,param_stds,N=2000,thinning=1)
     solar_forcing, volcanic_forcing, emissions = read_forcing_data(scenario,len(pos_configs),1750,2100)
     fair_posterior = runFaIR(solar_forcing,volcanic_forcing,emissions,pos_configs,scenario,
-                             start=1750,end=2100,stochastic_run=stochastic)
-    
+                             start=1750,end=2100,stochastic_run=True)
     solar_forcing, volcanic_forcing, emissions = read_forcing_data(scenario,len(MAP_config),1750,2100)
     fair_MAP = runFaIR(solar_forcing,volcanic_forcing,emissions,MAP_config,scenario,
-                       start=1750,end=2100,stochastic_run=stochastic)
-    plot_temperature(scenario,1750,2100,fair_calib,posterior=fair_posterior,MAP=fair_MAP,
-                     obs=gmst,obs_std=T.std(dim='realization'),savefig=save_figs)
-    plot_constraints(ds,N=10000,thinning=50,savefig=save_figs)
-    # Close dataset
-    ds.close()
-    del sys.path[-1]
+                       start=1750,end=2100,stochastic_run=True)
+    plot_temperature(fair_calib,fair_other_run=None,start=1750,end=2100,MAP=None,
+                     obs=gmst,obs_std=T.std(dim='realization'),savefig=False)
+    plot_constraints(ds,N=2000,thinning=1,savefig=True)
+# Close dataset
+ds.close()
+'''
